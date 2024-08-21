@@ -68,6 +68,15 @@ For example, this figure shows the magnetic equilibrium along with midplane prof
 
 __Note__: calculating the q-profile requries flux-surface tracing and can be computationally intensive. See the ``GFeq.get_qprofile()`` method for more details.
 
+The result plot for the "D" case is shown below, 
+<p align="center">
+  <img 
+    width=“1000”
+    alt="image"
+    src="https://github.com/user-attachments/assets/f79436f3-b7ef-415b-8d52-25484dfdf9e4"
+  >
+</p>
+
 ## Benchmarking
 The following table provides a comparison between values produced by this code and those published in Table 4 of [1].
 Interestingly we do not completely agree as to the values of alpha. However, using the ``GFeq.check_GS()`` method I have verified that each value of ``alpha`` produced by this program results in a maximum |LHS - RHS| GS error on the order of 1E-15.
