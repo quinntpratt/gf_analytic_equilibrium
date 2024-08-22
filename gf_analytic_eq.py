@@ -162,20 +162,10 @@ class GFeq(object):
         
         if get_qprofile:
             q, q_psi = self.get_qprofile(x,y,show_plot=show_plot)
-
-        # 5.3 Profiles,
-        psi_mid = self.get_psi(x, 0, alpha) # [m^2*T]
-        # analytic psi derivative of F2,
-        dF2_dpsi = (R0*B0)**2 * (4*dB/B0 * (psi_mid/Psi0) )
-        # Compute the plasma pressure -- eq. 2.2 of [1]
-        p_mid = p0*(psi_mid)**2
-        dp_dpsi = 2*p0*(psi_mid/Psi0) # analytic deriv.
-        # Compute the toroidal current density,
-        jphi = R*dp_dpsi + 0.5/(R*self.mu0)*dF2_dpsi # [A/m^2]
+            q_rho = np.sqrt(1 - q_psi) # define rho s.t. rho = 0(core), 1(sep) 
         
-        core_ind = np.argmin(abs(psi_mid -1.))
-        psi_mid_pos = psi_mid[core_ind:] # from 1(core)-->0(sep)
-        p_mid_pos = p_mid[core_ind:]
+        # Get all of these radial profiles,
+        R, psi, rho, p, jphi, p_rho = self.get_profiles(x)
         
         if show_plot:
             norm = Normalize(0, vmax=1)
@@ -198,7 +188,7 @@ class GFeq(object):
             ax0.set_xlabel("x")
             ax0.set_ylabel("y")
             # Plot the pressure and toroidal current density vs. x, 
-            axp0.plot(x, p_mid/max(p_mid), 'b-', label="norm. p")
+            axp0.plot(x, p/max(p), 'b-', label="norm. p")
             axp0.plot(x, jphi/max(jphi),'r-',label=r"norm. $j_\phi$")
             axp0.legend()
             axp0.set_xlabel("x (midplane)")
@@ -217,7 +207,7 @@ class GFeq(object):
             ax1.set_xlabel("R [m]")
             ax1.set_ylabel("Z [m]")
             # Plot the pressure and toroidal current density vs. R, 
-            axp1.plot(R, p_mid/max(p_mid), 'b-', label="norm. p(R)")
+            axp1.plot(R, p/max(p), 'b-', label="norm. p(R)")
             axp1.plot(R, jphi/max(jphi),'r-',label=r"norm. $j_\phi(R)$")
             axp1.legend()
             axp1.set_xlabel("R [m] (midplane)")
@@ -237,9 +227,9 @@ class GFeq(object):
             ax0.set_xlabel("R [m]")
             ax0.set_ylabel("Z [m]")
             ctf = ax0.contourf(R,Z,Psi/Psi0,**ctf_kw)
-            fig.colorbar(ctf, ax=ax0,label=r"Magnetic flux $\Psi/\Psi_0$")#,orientation='horizontal')
+            fig.colorbar(ctf, ax=ax0,label=r"Norm. pol. mag. flux $\psi = \Psi/\Psi_0$")#,orientation='horizontal')
             # For the pressure, assume the value is given in SI units,
-            ax1.plot(R, p_mid, 'b-')
+            ax1.plot(R, p, 'b-')
             ax1.set_ylabel("Plasma pressure [Pa]")
             ax1.set_xlabel("R [m] (midplane)")
             # For the Toroidal current density the SI units are [A]/[m]^2
@@ -247,17 +237,64 @@ class GFeq(object):
             ax2.set_ylabel(r"Toroidal current density, $j_\phi$ [A/m$^2$]")
             ax2.set_xlabel("R [m] (midplane)")
             # Also show the pressure and q profile vs. psi,
-            ax3.plot(psi_mid_pos[::-1], p_mid_pos,'b-')
+            ax3.plot(rho, p_rho, 'b-')
             ax3.set_ylabel("Plasma pressure [Pa]")
             if hasattr(self, "q0"):
                 ax4.plot(0,self.q0,'g P')
             if get_qprofile:
-                ax4.plot(q_psi[::-1], q,'g-')
+                ax4.plot(q_rho, q,'g-')
             ax4.set_ylabel(r"$q(\psi)$")
-            ax4.set_xlabel(r"$\psi$ (norm, rev.)")
+            for a in [ax3, ax4]:
+                a.set_xlabel(r"$\rho = \sqrt{1 - \psi}$")
             fig.tight_layout()
 
         return R, Z, Psi
+    
+    def get_profiles(self, x):
+        """
+        Method to obtain (radial/psi) profiles of various plasma equilibrium quantities.
+
+        Parameters
+        ----------
+        x : np.1darray
+            Normalized radial coordiante, -1 <= x <= 1
+
+        Returns
+        -------
+        R : np.1darray
+            Major radius [m]
+        psi : np.1darray
+            normalized poloidal magnetic flux 1(core), 0(sep)
+        rho : np.1darray
+            ~sqrt(psi) with 0(core) 1(sep)
+        p : np.1darray
+            pressure over all 'R'
+        jphi : np.1darray
+            toroidal current density [A/m^2] vs. R
+        p_rho : np.1darray
+            pressure over 'rho'.
+            
+        """
+        # Compute R from x, 
+        r = 1 + self.eps**2 + 2*self.eps*x
+        R = R0*np.sqrt(r) # [m]
+        
+        # 5.3 Profiles,
+        psi = self.get_psi(x, 0, self.alpha)
+        # analytic psi derivative of F2,
+        dF2_dpsi = (self.R0*self.B0)**2 * (4*self.dB/self.B0 * (psi/self.Psi0) )
+        # Compute the plasma pressure -- eq. 2.2 of [1]
+        p = self.p0*(psi)**2
+        dp_dpsi = 2*self.p0*(psi/self.Psi0) # analytic deriv.
+        # Compute the toroidal current density,
+        jphi = R*dp_dpsi + 0.5/(R*self.mu0)*dF2_dpsi # [A/m^2]
+        
+        core_ind = np.argmin(abs(psi - 1.))
+        # psi goes from 1(core) --> 0(sep). Reverse to define 'rho',
+        rho = np.sqrt(1 - psi[core_ind:]) # from 0(core)-->1(sep)
+        p_rho = p[core_ind:]
+        
+        return R, psi, rho, p, jphi, p_rho
     
     def get_plasma_params(self, x, y):
         """ Method to evaluate various plasma parameters from Sec. 6 of [1]
@@ -381,8 +418,8 @@ class GFeq(object):
             
         if show_plot:
             # flip psi so core = 0, sep = 1...
-            ax1.plot(psi_vals[::-1], q,'g-')
-            ax1.set_xlabel(r"Normalized $\psi$") # core = 1, sep = 0.
+            ax1.plot(1-psi_vals, q,'g-')
+            ax1.set_xlabel(r"Normalized $\psi_n = 1-\psi$") # core = 1, sep = 0.
             ax1.set_ylabel(r"$q(\psi)$")
             if hasattr(self, 'q0'):
                 ax1.plot(0, self.q0,'g P')
@@ -527,7 +564,7 @@ class GFeq(object):
         print(f"Maximum |LHS-RHS| GS Error = {np.amax(err):.2e}")
         return err            
     
-    def get_alpha(self,almin=0.1,almax=2.5,N_coarse=40,show_plot=True,do_fine=True):
+    def get_alpha(self,almin=2.2,almax=2.4,N_coarse=50,show_plot=True,do_fine=True):
         """
         Method to solve for the eigenvalue \alpha
         Only positive eigenvalues need to be considered.
@@ -819,8 +856,28 @@ B0 = 2.0 # [T]
 T0 = 3 # [keV]
 n0 = 6. # [E19 1/m^3]
 p0 = n0*T0 * 1602.2 # [Pa]/[keV * E19/m^3]
-# Main routine,
-# bypass the determination of alpha by providing a fixed value,
-eq.get_PsiRZ(R0, B0, p0, alpha=1.9057)
 
+# %% Main routine,
+# Note: bypass the determination of alpha by providing alpha as kwarg.
+#       otherwise set almin, almax kwargs to bound the get_alpha method. 
+eq.get_PsiRZ(R0, B0, p0, almin=1.8, almax=2.0)
 
+# %% Analysis of profiles,
+# Create a normalized radial array,
+x = np.linspace(-1,1,257)
+# Run the get_profiles routine,
+R, psi, rho, p, jphi, p_rho = eq.get_profiles(x)
+# Convert the pressure profile to [keV * E19/m^3]
+p = p_rho/1602.2
+# Plot, 
+fig, ax = plt.subplots(1,1,num="Profiles")
+ax.plot(rho, p, label="pressure")
+ax.set_xlabel(r"$\rho$")
+ax.set_ylabel(r"p, n [E19 m$^{-3}$], T [keV]")
+# Deconvolve the density and temperature profiles,
+n = sqrt(n0/T0)*np.sqrt(p)
+T = sqrt(T0/n0)*np.sqrt(p)
+ax.plot(rho, n,label="density")
+ax.plot(rho, T,label="temperature")
+# verify, 
+ax.legend()
