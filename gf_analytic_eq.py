@@ -41,6 +41,11 @@ from scipy.linalg import solve
 from scipy.optimize import minimize
 from scipy.interpolate import interp1d
 from skimage import measure
+from pathlib import Path
+
+write_output_file = True
+output_dir = str(Path(".").resolve()) + "/" # defaults to same dir as this code.
+output_filename = "gf_eq_out.csv"
 
 class GFeq(object):
     def __init__(self, eps=0.33, kappa=1, delta=0, nu=1):
@@ -296,6 +301,42 @@ class GFeq(object):
         
         return R, psi, rho, p, jphi, p_rho
     
+    def get_B(self, Nx=257, Ny=257):
+        """
+        Method to return the components of the magnetic field over an R,Z grid.
+            B = \nabla \Psi \times \nabla \phi + F(\psi)\nabla\phi
+
+        Parameters
+        ----------
+        Nx : TYPE, optional
+            DESCRIPTION.
+        Ny : TYPE, optional
+            DESCRIPTION.
+
+        Returns
+        -------
+        None.
+
+        """
+        # 1D normalized grids,
+        x = np.linspace(-1, 1, Nx) # -1 <= x <= 1
+        y = np.linspace(-self.kappa, self.kappa, Ny) # -kappa <= y <= kappa 
+        xx, yy = np.meshgrid(x,y)
+        # Use analytic expressions for the psi_x, psi_y derivatives...
+        a = self.eps*R0 # [m]
+        r = 1 + self.eps**2 + 2*self.eps*xx
+        R = R0*np.sqrt(r) # [m]
+        Z = a*yy
+        
+        # Compute the first derivatives of the normalized poloidal mag. flux,
+        psi_x, psi_y = self.get_psip(xx,yy,self.alpha)
+        
+        B_R = -self.Psi0/(a*R)*psi_y #[T]
+        B_Z = self.Psi0/(R**2*self.eps)*psi_x # [T]
+        B_phi = self.F(self.Psi0*self.get_psi(xx,yy,self.alpha))/R
+        
+        return B_R, B_phi, B_Z, R, Z
+        
     def get_plasma_params(self, x, y):
         """ Method to evaluate various plasma parameters from Sec. 6 of [1]
         """
@@ -845,22 +886,23 @@ cases = {"circle":dict(eps=0.33,kappa=1,delta=0,nu=1), # alpha = 2.3577
          "ellipse":dict(eps=0.25,kappa=2,delta=0,nu=1), # alpha = 1.8724
          "D":dict(eps=0.33, kappa=1.8, delta=0.4, nu=0.3), # alpha = 1.9057
          "negD":dict(eps=0.33, kappa=1.9, delta=-0.6, nu=0.5), # alpha = 1.8744 
+         "NSTX":dict(eps=1/1.31, kappa=2,delta=0.4, nu=1), # alpha=1.9252
          }
 
 # Create an instance of the GF equilibrium.
-eq = GFeq(**cases["D"])
+eq = GFeq(**cases["NSTX"])
 # Paramters with SI units to compute the magnetic flux over R, Z,
-R0 = 1.0 # [m] 
-B0 = 2.0 # [T]
+R0 = 0.85 # [m] 
+B0 = 0.6 # [T]
 # on-axis pressure,
-T0 = 3 # [keV]
-n0 = 6. # [E19 1/m^3]
+T0 = 2. # [keV]
+n0 = 4. # [E19 1/m^3]
 p0 = n0*T0 * 1602.2 # [Pa]/[keV * E19/m^3]
 
 # %% Main routine,
 # Note: bypass the determination of alpha by providing alpha as kwarg.
 #       otherwise set almin, almax kwargs to bound the get_alpha method. 
-eq.get_PsiRZ(R0, B0, p0, almin=1.8, almax=2.0)
+R, Z, Psi = eq.get_PsiRZ(R0, B0, p0, almin=1.8, almax=2.0,get_qprofile=False)
 
 # %% Analysis of profiles,
 # Create a normalized radial array,
@@ -881,3 +923,41 @@ ax.plot(rho, n,label="density")
 ax.plot(rho, T,label="temperature")
 # verify, 
 ax.legend()
+
+# %% Create a file of field components (and density)
+# compute the model surface, 
+theta = np.linspace(0, 2*np.pi, 256)
+a = eq.eps*R0
+Rs = R0 + a*np.cos(theta + eq.delta_hat*np.sin(theta)) 
+Zs = a*eq.kappa*np.sin(theta)
+
+# Compute the field components,
+B_R, B_phi, B_Z, RR, ZZ = eq.get_B()
+# Recompute the density over the 2D Psi (see above)
+density = sqrt(n0/T0)*np.sqrt(p0/1602.2*(Psi/eq.Psi0)**2) # E19 1/m^3
+# Outside the model suface,
+sol_inds = Psi < 0 # this should always work, psi(LCFS = 0) is the GS BC
+density[sol_inds] = 0.0 
+
+# Plot,
+fig, axs = plt.subplots(1,4,num="Magnetic field and density",figsize=(12, 5))
+labels = [r"$B_R$", r"$B_\phi$", r"$B_Z$",r"$n$"]
+units = ["[T]"]*3 + [r"E19 $1/m^3$"]
+for i, quant in enumerate([B_R, B_phi, B_Z, density]):
+    pc = axs[i].pcolor(RR, ZZ, quant)
+    fig.colorbar(pc, ax=axs[i],label=f"{labels[i]} {units[i]}")
+    axs[i].set_title(labels[i])
+    axs[i].set_aspect("equal")
+    axs[i].plot(Rs, Zs, 'r-')
+    axs[i].set_xlabel("R [m]")
+    axs[i].set_ylabel("Z [m]")
+fig.tight_layout()
+# Write to a file...
+if write_output_file:
+    data = np.array([RR.flatten(),ZZ.flatten(), density.flatten(), 
+                     B_R.flatten(), B_phi.flatten(), B_Z.flatten()]).T
+    print(f"INFO: writing data to {output_dir+output_filename}")
+    np.savetxt(output_dir + output_filename, 
+               data,
+               header="R,Z,ne,Bx,By,Bz",delimiter=",",comments="%",
+               )
