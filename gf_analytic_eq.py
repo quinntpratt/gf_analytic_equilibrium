@@ -17,7 +17,7 @@ scalars: eps = a/R0 (inverse aspect ratio), kappa (elongation), and delta
 (triangularity). The parameter \nu is related to the poloidal beta.
 
 The 'free functions' -- plasma pressure, p, and ff' -- are restricted to  
-quadratic functions of \psi. 
+quadratic functions of \Psi. 
 
 To compute the poloidal magnetic flux, \Psi(R, Z), three additional parameters
 are required: 
@@ -42,10 +42,6 @@ from scipy.optimize import minimize
 from scipy.interpolate import interp1d
 from skimage import measure
 from pathlib import Path
-
-write_output_file = True
-output_dir = str(Path(".").resolve()) + "/" # defaults to same dir as this code.
-output_filename = "gf_eq_out.csv"
 
 class GFeq(object):
     def __init__(self, eps=0.33, kappa=1, delta=0, nu=1):
@@ -84,7 +80,6 @@ class GFeq(object):
         
         # Numerical controls, 
         self.M = 50 # number of terms in the C_n(x), S_n(x) expansions.
-        
             
     def get_PsiRZ(self, R0, B0, p0, Nx=257,Ny=257,get_qprofile=True,alpha=None,show_plot=True, **kwargs):
         """
@@ -143,9 +138,10 @@ class GFeq(object):
         # 3. Compute dB and Psi0,
         # Toroidal beta on-axis Sec. 6 of [1] ([units of mu0] * [Pa] = [T^2])
         beta0 = 2*self.mu0*p0/B0**2 
+        print(f"INFO: beta0 = {beta0:.3f} []")
         # Plasma diamagnetism (dB/B0), eq. 6.4 of [1]
         dB = B0 * 0.5*beta0*(1 + self.eps**2)*(1 - self.nu)/self.nu # [T]
-        print(f"INFO: dB = {dB:.3e} [T]")
+        print(f"INFO: dB/B0 = {dB/B0:.3e} []")
         # Magnetic flux on-axis, eq. 6.5 of [1]
         Psi0 = self.eps*B0*R0**2/alpha * sqrt(beta0/self.nu) # [m^2 * T]
         print(f"INFO: Psi0 = {Psi0:.3e} [m^2*T]")
@@ -167,10 +163,10 @@ class GFeq(object):
         
         if get_qprofile:
             q, q_psi = self.get_qprofile(x,y,show_plot=show_plot)
-            q_rho = np.sqrt(1 - q_psi) # define rho s.t. rho = 0(core), 1(sep) 
+            q_psin = -1*(q_psi - 1) # define rho s.t. rho = 0(core), 1(sep) 
         
         # Get all of these radial profiles,
-        R, psi, rho, p, jphi, p_rho = self.get_profiles(x)
+        R, psi, psi_n, p, jphi, p_psin = self.get_profiles(x)
         
         if show_plot:
             norm = Normalize(0, vmax=1)
@@ -192,6 +188,9 @@ class GFeq(object):
             ax0.set_aspect("equal")
             ax0.set_xlabel("x")
             ax0.set_ylabel("y")
+            ax0.set_title(r"Normalized $\psi(x,y)$")
+            for k in ax0.spines:
+                ax0.spines[k].set_visible(False)
             # Plot the pressure and toroidal current density vs. x, 
             axp0.plot(x, p/max(p), 'b-', label="norm. p")
             axp0.plot(x, jphi/max(jphi),'r-',label=r"norm. $j_\phi$")
@@ -211,6 +210,9 @@ class GFeq(object):
             ax1.set_aspect("equal")
             ax1.set_xlabel("R [m]")
             ax1.set_ylabel("Z [m]")
+            ax1.set_title(r"$\Psi(R,Z)$ [m$^2$T]")
+            for k in ax1.spines:
+                ax1.spines[k].set_visible(False)
             # Plot the pressure and toroidal current density vs. R, 
             axp1.plot(R, p/max(p), 'b-', label="norm. p(R)")
             axp1.plot(R, jphi/max(jphi),'r-',label=r"norm. $j_\phi(R)$")
@@ -242,15 +244,15 @@ class GFeq(object):
             ax2.set_ylabel(r"Toroidal current density, $j_\phi$ [A/m$^2$]")
             ax2.set_xlabel("R [m] (midplane)")
             # Also show the pressure and q profile vs. psi,
-            ax3.plot(rho, p_rho, 'b-')
+            ax3.plot(psi_n, p_psin, 'b-')
             ax3.set_ylabel("Plasma pressure [Pa]")
             if hasattr(self, "q0"):
                 ax4.plot(0,self.q0,'g P')
             if get_qprofile:
-                ax4.plot(q_rho, q,'g-')
+                ax4.plot(q_psin, q,'g-')
             ax4.set_ylabel(r"$q(\psi)$")
             for a in [ax3, ax4]:
-                a.set_xlabel(r"$\rho = \sqrt{1 - \psi}$")
+                a.set_xlabel(r"$\psi_n$")
             fig.tight_layout()
 
         return R, Z, Psi
@@ -258,6 +260,7 @@ class GFeq(object):
     def get_profiles(self, x):
         """
         Method to obtain (radial/psi) profiles of various plasma equilibrium quantities.
+        Values are calculated using the get_psi() function evaluated along the midplane (y=0).
 
         Parameters
         ----------
@@ -270,19 +273,19 @@ class GFeq(object):
             Major radius [m]
         psi : np.1darray
             normalized poloidal magnetic flux 1(core), 0(sep)
-        rho : np.1darray
-            ~sqrt(psi) with 0(core) 1(sep)
+        psi_n : np.1darray
+            normalized poloidal magnetic flux 0(core), 1(sep)
         p : np.1darray
             pressure over all 'R'
         jphi : np.1darray
             toroidal current density [A/m^2] vs. R
-        p_rho : np.1darray
-            pressure over 'rho'.
+        p_psin : np.1darray
+            pressure over 'psi_n'.
             
         """
         # Compute R from x, 
         r = 1 + self.eps**2 + 2*self.eps*x
-        R = R0*np.sqrt(r) # [m]
+        R = self.R0*np.sqrt(r) # [m]
         
         # 5.3 Profiles,
         psi = self.get_psi(x, 0, self.alpha)
@@ -294,12 +297,16 @@ class GFeq(object):
         # Compute the toroidal current density,
         jphi = R*dp_dpsi + 0.5/(R*self.mu0)*dF2_dpsi # [A/m^2]
         
-        core_ind = np.argmin(abs(psi - 1.))
-        # psi goes from 1(core) --> 0(sep). Reverse to define 'rho',
-        rho = np.sqrt(1 - psi[core_ind:]) # from 0(core)-->1(sep)
-        p_rho = p[core_ind:]
+        core_ind = np.argmin(np.abs(psi - 1.))
+        #bndry_ind = np.argmin(np.abs(psi))
+        # define the standard \psi_n (normalized poloidal magnetic flux) over
+        # the entire midplane.
+        psi_n = -1*(psi - 1)
+        psi_n = psi_n[core_ind:]
         
-        return R, psi, rho, p, jphi, p_rho
+        p_psin = p[core_ind:]
+        
+        return R, psi, psi_n, p, jphi, p_psin
     
     def get_B(self, Nx=257, Ny=257):
         """
@@ -323,9 +330,9 @@ class GFeq(object):
         y = np.linspace(-self.kappa, self.kappa, Ny) # -kappa <= y <= kappa 
         xx, yy = np.meshgrid(x,y)
         # Use analytic expressions for the psi_x, psi_y derivatives...
-        a = self.eps*R0 # [m]
+        a = self.eps*self.R0 # [m]
         r = 1 + self.eps**2 + 2*self.eps*xx
-        R = R0*np.sqrt(r) # [m]
+        R = self.R0*np.sqrt(r) # [m]
         Z = a*yy
         
         # Compute the first derivatives of the normalized poloidal mag. flux,
@@ -342,14 +349,30 @@ class GFeq(object):
         """
         xx, yy = np.meshgrid(x,y)
         psi_xy = self.get_psi(xx, yy, self.alpha)
-        
+                
         # Toroidal plasma current, I, eq. 6.8 of [1]
         integrand = (1 + self.nu*self.eps_hat*xx)/(1 + self.eps_hat*xx)*psi_xy
+        integrand2 = (1 + self.nu*self.eps_hat*xx)/(1 + self.eps_hat*xx)*psi_xy**2
         integral = np.trapz(np.trapz(integrand,y,axis=0), x)
+        integral2 = np.trapz(np.trapz(integrand2,y,axis=0), x)
         pre = self.eps*self.B0*self.R0*self.alpha*sqrt(self.beta0/self.nu)
         I = pre*integral/self.mu0
         print(f"INFO: Toroidal plasma current, I = {I/1E6:.3f} [MA]")
         
+        # Volume-averaged toroidal \beta, eq. 6.6 of [1]
+        psi2int = np.trapz(np.trapz(psi_xy**2,y,axis=0), x) # psi^2 dxdy
+        denom = np.trapz(np.trapz(0*xx+1.,y,axis=0), x) # dxdy
+        beta_tor = self.beta0 * psi2int/denom
+        print(f"INFO: Volume-averaged toroidal beta = {beta_tor:.3f}")
+        
+        # Vol.-avg. poloidal \beta, eq. 6.7 of [1]
+        beta_pol = self.nu*psi2int/integral2
+        print(f"INFO: Volume-averaged poloidal beta = {beta_pol:.3f}")
+        
+        # Normalized internal inductance per unit length li, eq. 6.8
+        li = 4*pi/self.alpha**2 * integral2/integral**2
+        print(f"INFO: Norm. internal inductance, li = {li:.3f}")
+
         # On-axis saftey factor,
         psi_mid = self.get_psi(x,0,self.alpha)
         psi1_ind = np.argmin(abs(psi_mid - 1.0)) # core index.
@@ -381,7 +404,6 @@ class GFeq(object):
 
         """
         return self.R0*self.B0*np.sqrt(1 + 2*self.dB/self.B0*psi**2)
-
     
     def get_qprofile(self,x,y,psi_min=0.05,show_plot=True):
         """
@@ -460,7 +482,7 @@ class GFeq(object):
         if show_plot:
             # flip psi so core = 0, sep = 1...
             ax1.plot(1-psi_vals, q,'g-')
-            ax1.set_xlabel(r"Normalized $\psi_n = 1-\psi$") # core = 1, sep = 0.
+            ax1.set_xlabel(r"$\psi_n$") # core = 0, sep = 1.
             ax1.set_ylabel(r"$q(\psi)$")
             if hasattr(self, 'q0'):
                 ax1.plot(0, self.q0,'g P')
@@ -880,84 +902,88 @@ class GFeq(object):
                         -2*self.eps_hat*(m-2)*kn*a[m-2] )
         
         return a, b
-            
-# Standard cases,   
-cases = {"circle":dict(eps=0.33,kappa=1,delta=0,nu=1), # alpha = 2.3577
-         "ellipse":dict(eps=0.25,kappa=2,delta=0,nu=1), # alpha = 1.8724
-         "D":dict(eps=0.33, kappa=1.8, delta=0.4, nu=0.3), # alpha = 1.9057
-         "negD":dict(eps=0.33, kappa=1.9, delta=-0.6, nu=0.5), # alpha = 1.8744 
-         "NSTX":dict(eps=1/1.31, kappa=2,delta=0.4, nu=1), # alpha=1.9252
-         }
 
-# Create an instance of the GF equilibrium.
-eq = GFeq(**cases["NSTX"])
-# Paramters with SI units to compute the magnetic flux over R, Z,
-R0 = 0.85 # [m] 
-B0 = 0.6 # [T]
-# on-axis pressure,
-T0 = 2. # [keV]
-n0 = 4. # [E19 1/m^3]
-p0 = n0*T0 * 1602.2 # [Pa]/[keV * E19/m^3]
-
-# %% Main routine,
-# Note: bypass the determination of alpha by providing alpha as kwarg.
-#       otherwise set almin, almax kwargs to bound the get_alpha method. 
-R, Z, Psi = eq.get_PsiRZ(R0, B0, p0, almin=1.8, almax=2.0,get_qprofile=False)
-
-# %% Analysis of profiles,
-# Create a normalized radial array,
-x = np.linspace(-1,1,257)
-# Run the get_profiles routine,
-R, psi, rho, p, jphi, p_rho = eq.get_profiles(x)
-# Convert the pressure profile to [keV * E19/m^3]
-p = p_rho/1602.2
-# Plot, 
-fig, ax = plt.subplots(1,1,num="Profiles")
-ax.plot(rho, p, label="pressure")
-ax.set_xlabel(r"$\rho$")
-ax.set_ylabel(r"p, n [E19 m$^{-3}$], T [keV]")
-# Deconvolve the density and temperature profiles,
-n = sqrt(n0/T0)*np.sqrt(p)
-T = sqrt(T0/n0)*np.sqrt(p)
-ax.plot(rho, n,label="density")
-ax.plot(rho, T,label="temperature")
-# verify, 
-ax.legend()
-
-# %% Create a file of field components (and density)
-# compute the model surface, 
-theta = np.linspace(0, 2*np.pi, 256)
-a = eq.eps*R0
-Rs = R0 + a*np.cos(theta + eq.delta_hat*np.sin(theta)) 
-Zs = a*eq.kappa*np.sin(theta)
-
-# Compute the field components,
-B_R, B_phi, B_Z, RR, ZZ = eq.get_B()
-# Recompute the density over the 2D Psi (see above)
-density = sqrt(n0/T0)*np.sqrt(p0/1602.2*(Psi/eq.Psi0)**2) # E19 1/m^3
-# Outside the model suface,
-sol_inds = Psi < 0 # this should always work, psi(LCFS = 0) is the GS BC
-density[sol_inds] = 0.0 
-
-# Plot,
-fig, axs = plt.subplots(1,4,num="Magnetic field and density",figsize=(12, 5))
-labels = [r"$B_R$", r"$B_\phi$", r"$B_Z$",r"$n$"]
-units = ["[T]"]*3 + [r"E19 $1/m^3$"]
-for i, quant in enumerate([B_R, B_phi, B_Z, density]):
-    pc = axs[i].pcolor(RR, ZZ, quant)
-    fig.colorbar(pc, ax=axs[i],label=f"{labels[i]} {units[i]}")
-    axs[i].set_title(labels[i])
-    axs[i].set_aspect("equal")
-    axs[i].plot(Rs, Zs, 'r-')
-    axs[i].set_xlabel("R [m]")
-    axs[i].set_ylabel("Z [m]")
-fig.tight_layout()
-# Write to a file...
-if write_output_file:
-    data = np.array([RR.flatten(),ZZ.flatten(), density.flatten(), 
-                     B_R.flatten(), B_phi.flatten(), B_Z.flatten()]).T
-    print(f"INFO: writing data to {output_dir+output_filename}")
-    np.savetxt(output_dir + output_filename, 
-               data,
-               header="R,Z,ne,Bx,By,Bz",delimiter=",",comments="%",
-               )
+if __name__ == "__main__":   
+    write_output_file = False
+    output_dir = str(Path(".").resolve()) + "/" # defaults to same dir as this code.
+    output_filename = "gf_eq_out.csv"         
+    # Standard cases,   
+    cases = {"circle":dict(eps=0.33,kappa=1,delta=0,nu=1), # alpha = 2.3577
+             "ellipse":dict(eps=0.25,kappa=2,delta=0,nu=1), # alpha = 1.8724
+             "D":dict(eps=0.33, kappa=1.8, delta=0.4, nu=0.3), # alpha = 1.9057
+             "negD":dict(eps=0.33, kappa=1.9, delta=-0.6, nu=0.5), # alpha = 1.8744 
+             "NSTX":dict(eps=1/1.31, kappa=2,delta=0.4, nu=1), # alpha=1.9252
+             }
+    
+    # Create an instance of the GF equilibrium.
+    eq = GFeq(**cases["NSTX"])
+    # Paramters with SI units to compute the magnetic flux over R, Z,
+    R0 = 1.03 # [m] 
+    B0 = 0.44 # [T]
+    # on-axis pressure,
+    T0 = 4. # [keV]
+    n0 = 5. # [E19 1/m^3]
+    p0 = n0*T0 * 1602.2 # [Pa]/[keV * E19/m^3]
+    
+    # %% Main routine,
+    # Note: bypass the determination of alpha by providing alpha as kwarg.
+    #       otherwise set almin, almax kwargs to bound the get_alpha method. 
+    R, Z, Psi = eq.get_PsiRZ(R0, B0, p0, almin=1.8, almax=2.0, get_qprofile=True)
+    
+    # %% Analysis of profiles,
+    # Create a normalized radial array,
+    x = np.linspace(-1,1,257)
+    # Run the get_profiles routine,
+    R, psi, psi_n, p, jphi, p_psin = eq.get_profiles(x)
+    # Convert the pressure profile to [keV * E19/m^3]
+    p = p_psin/1602.2
+    # Plot, 
+    fig, ax = plt.subplots(1,1,num="Profiles")
+    ax.plot(psi_n, p, label="pressure")
+    ax.set_xlabel(r"$\psi_n$")
+    ax.set_ylabel(r"p, n [E19 m$^{-3}$], T [keV]")
+    # Deconvolve the density and temperature profiles,
+    n = sqrt(n0/T0)*np.sqrt(p)
+    T = sqrt(T0/n0)*np.sqrt(p)
+    ax.plot(psi_n, n, label="density")
+    ax.plot(psi_n, T, label="temperature")
+    # verify, 
+    ax.legend()
+    
+    # %% Create a file of field components (and density)
+    # compute the model surface, 
+    theta = np.linspace(0, 2*np.pi, 256)
+    a = eq.eps*R0
+    Rs = R0 + a*np.cos(theta + eq.delta_hat*np.sin(theta)) 
+    Zs = a*eq.kappa*np.sin(theta)
+    
+    # Compute the field components,
+    B_R, B_phi, B_Z, RR, ZZ = eq.get_B()
+    # Recompute the density over the 2D Psi (see above)
+    density = sqrt(n0/T0)*np.sqrt(p0/1602.2*(Psi/eq.Psi0)**2) # E19 1/m^3
+    # Outside the model suface,
+    sol_inds = Psi < 0 # this should always work, psi(LCFS = 0) is the GS BC
+    density[sol_inds] = 0.0 
+    
+    # Plot,
+    fig, axs = plt.subplots(1,4,num="Magnetic field and density",figsize=(12, 5))
+    labels = [r"$B_R$", r"$B_\phi$", r"$B_Z$",r"$n$"]
+    units = ["[T]"]*3 + [r"E19 $1/m^3$"]
+    for i, quant in enumerate([B_R, B_phi, B_Z, density]):
+        pc = axs[i].pcolor(RR, ZZ, quant)
+        fig.colorbar(pc, ax=axs[i],label=f"{labels[i]} {units[i]}")
+        axs[i].set_title(labels[i])
+        axs[i].set_aspect("equal")
+        axs[i].plot(Rs, Zs, 'r-')
+        axs[i].set_xlabel("R [m]")
+        axs[i].set_ylabel("Z [m]")
+    fig.tight_layout()
+    # Write to a file...
+    if write_output_file:
+        data = np.array([RR.flatten(),ZZ.flatten(), density.flatten(), 
+                         B_R.flatten(), B_phi.flatten(), B_Z.flatten()]).T
+        print(f"INFO: writing data to {output_dir+output_filename}")
+        np.savetxt(output_dir + output_filename, 
+                   data,
+                   header="R,Z,ne,Bx,By,Bz",delimiter=",",comments="%",
+                   )
