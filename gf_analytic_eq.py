@@ -12,7 +12,8 @@ describing tokamak equilibria using a method developed by Guazzotto and
 Freidberg in [1].
 
 In this program we create up/down symmetric equilibria with model flux surfaces
-based on the Miller geometry [2]. Flux surface shapes are characterized with 
+based on the Miller geometry [2]. 
+Flux surface shapes are characterized with 
 scalars: eps = a/R0 (inverse aspect ratio), kappa (elongation), and delta 
 (triangularity). The parameter \nu is related to the poloidal beta.
 
@@ -24,11 +25,15 @@ are required:
     (1) the vacuum toroidal field (B0)  
     (2) the on-axis plasma pressure (p0)
     (3) the axial major radius (R0)
+    
+Flux surface tracing has been implemented to calculate the q-profile as well 
+as the toroidal magnetic flux (and \rho = sqrt(Phi/Phi_bndry)).
 
 References
 ----------
 [1] J. Plasma Phys. (2021), vol. 87, 905870303; https://doi.org/10.1017/S002237782100009X
 [2] Physics of Plasmas 5, 973 (1998); https://doi.org/10.1063/1.872666
+[3] https://youjunhu.github.io/research_notes/tokamak_equilibrium_htlatex/tokamak_equilibrium.html
 
 All rights reserved
 """
@@ -39,7 +44,8 @@ from matplotlib.colors import Normalize
 from math import sqrt, pi
 from scipy.linalg import solve
 from scipy.optimize import minimize
-from scipy.interpolate import interp1d
+from scipy.interpolate import interp1d, RegularGridInterpolator
+from scipy.integrate import cumulative_trapezoid
 from skimage import measure
 from pathlib import Path
 
@@ -65,8 +71,7 @@ class GFeq(object):
         self.kappa = kappa
         self.delta = delta
         self.nu = nu
-        
-        # Useful quantities, 
+        # Quantities used in the GS solution, 
         self.eps_hat = 2*self.eps/(1 + self.eps**2) # eq. 2.9 of [1]
         self.delta_hat = np.arcsin(self.delta) # under eq. 3.4 of [1]
         self.xd = self.delta + 0.5*self.eps*(1 - self.delta**2) # under eq. 3.5 of [1]
@@ -74,16 +79,36 @@ class GFeq(object):
         self.Lam1 = (1 - self.eps)*(1 - self.delta_hat)**2/self.kappa**2
         self.Lam2 = (1 + self.eps)*(1 + self.delta_hat)**2/self.kappa**2
         self.Lam3 = self.kappa/( (1 - self.eps*self.delta)**2*(1 - self.delta**2) )
-        
         # Physical constants,
         self.mu0 = 1.2566E-6 # vacuum perm. [m]*[kg]/[s]^2/[A]^2
-        
         # Numerical controls, 
         self.M = 50 # number of terms in the C_n(x), S_n(x) expansions.
+    
+    def __repr__(self):
+        return f"GFeq({self.eps},{self.kappa},{self.delta},{self.nu})"
+    
+    def __str__(self):
+        txt = f"""Guazzotto-Freidberg analytic tokamak equilibrium
+Input params
+------------
+    eps   = {self.eps}
+    kappa = {self.kappa}
+    delta = {self.delta}
+    nu    = {self.nu}
+"""
+        return txt
             
-    def get_PsiRZ(self, R0, B0, p0, Nx=257,Ny=257,get_qprofile=True,alpha=None,show_plot=True, **kwargs):
+    def get_PsiRZ(self, R0, B0, p0, Nx=257, Ny=257, levels=None, do_trace=True, alpha=None,show_plot=True, **kwargs):
         """
-        Main function to compute the poloidal magnetic flux over an R, Z grid.
+        Main method to compute the poloidal magnetic flux over an (R, Z) grid.
+        This method creates a normalized grid (x, y), solves the GS eigenvalue
+            problem by determening \alpha
+            NOTE: if alpha is provided above, the eigenvalue calculation is 
+            skipped.
+        
+        To compute the physical \Psi(R,Z), the on-axis poloidal flux is calculated
+            along with other 0D parameters.
+        Finally, additional profiles are calculated assuming do_trace=True.
 
         Parameters
         ----------
@@ -135,6 +160,8 @@ class GFeq(object):
         # 2. Compute the 2D normalized psi(x,y) = Psi/Psi0
         psi_xy = self.get_psi(xx,yy,alpha)
         
+        maxis_ind = np.argmax(psi_xy.flatten()) # index in x ~ R
+        
         # 3. Compute dB and Psi0,
         # Toroidal beta on-axis Sec. 6 of [1] ([units of mu0] * [Pa] = [T^2])
         beta0 = 2*self.mu0*p0/B0**2 
@@ -149,63 +176,45 @@ class GFeq(object):
         self.beta0 = beta0
         self.dB = dB
         self.Psi0 = Psi0
-
+        
         # 4. Un-normalize to RZ,
         a = self.eps*R0 # [m]
         r = 1 + self.eps**2 + 2*self.eps*x
         R = R0*np.sqrt(r) # [m]
         Z = a*y # [m]
         
+        RR = R0*np.sqrt(1 + self.eps**2 + 2*self.eps*xx)
+        self.Rmaxis = float(RR.flatten()[maxis_ind])
+        self.Zmaxis = 0.0 # by construction
+        
+        # Compute the model surface: xs(theta), ys(theta)
+        Nt = 101
+        theta = np.linspace(0, 2*pi, Nt)
+        #xs = np.cos(theta + self.delta_hat*np.sin(theta)) - \
+        #    0.5*self.eps*(np.sin(theta + self.delta_hat*np.sin(theta)))**2
+        #ys = self.kappa*np.sin(theta)
+        self.Rms = R0 + a*np.cos(theta + self.delta_hat*np.sin(theta)) 
+        self.Zms = a*self.kappa*np.sin(theta)
+        
         Psi = psi_xy * Psi0 # [m^2*T]
         
         # 5. Additional calculations,
-        I, q0 = self.get_plasma_params(x, y)
-        
-        if get_qprofile:
-            q, q_psi = self.get_qprofile(x,y,show_plot=show_plot)
-            q_psin = -1*(q_psi - 1) # define rho s.t. rho = 0(core), 1(sep) 
-        
-        # Get all of these radial profiles,
-        R, psi, psi_n, p, jphi, p_psin = self.get_profiles(x)
+        self.get_plasma_params(x, y)
+        if do_trace:
+            if levels is None:
+                levels = np.linspace(0.05, 1.0, 32)
+            self.trace_surfaces(levels, show_plot=False)
         
         if show_plot:
             norm = Normalize(0, vmax=1)
             cmap=plt.get_cmap("viridis")
             cmap.set_under(color='w')
             ctf_kw = dict(cmap=cmap,norm=norm,levels=10)
-            # --- 
-            fig, (ax0, axp0) = plt.subplots(1,2,num="GFeq.get_PsiRZ psi_xy")
-            
-            # Compute the model surface: xs(theta), ys(theta)
-            Nt = 101
-            theta = np.linspace(0, 2*pi, Nt)
-            xs = np.cos(theta + self.delta_hat*np.sin(theta)) - \
-                0.5*self.eps*(np.sin(theta + self.delta_hat*np.sin(theta)))**2
-            ys = self.kappa*np.sin(theta)
-            
-            ax0.plot(xs, ys, 'r-')
-            ax0.contourf(x,y,psi_xy,**ctf_kw)
-            ax0.set_aspect("equal")
-            ax0.set_xlabel("x")
-            ax0.set_ylabel("y")
-            ax0.set_title(r"Normalized $\psi(x,y)$")
-            for k in ax0.spines:
-                ax0.spines[k].set_visible(False)
-            # Plot the pressure and toroidal current density vs. x, 
-            axp0.plot(x, p/max(p), 'b-', label="norm. p")
-            axp0.plot(x, jphi/max(jphi),'r-',label=r"norm. $j_\phi$")
-            axp0.legend()
-            axp0.set_xlabel("x (midplane)")
-            fig.tight_layout()
-
+        
             # --- 
             fig, (ax1, axp1) = plt.subplots(1,2,num="GFeq.get_PsiRZ PsiRZ")
 
-            # Compute the model surface, 
-            Rs = R0 + a*np.cos(theta + self.delta_hat*np.sin(theta)) 
-            Zs = a*self.kappa*np.sin(theta)
-            
-            ax1.plot(Rs, Zs, 'r-')
+            ax1.plot(self.Rms, self.Zms, 'r-')
             ax1.contourf(R,Z,Psi/Psi0,**ctf_kw)
             ax1.set_aspect("equal")
             ax1.set_xlabel("R [m]")
@@ -214,8 +223,8 @@ class GFeq(object):
             for k in ax1.spines:
                 ax1.spines[k].set_visible(False)
             # Plot the pressure and toroidal current density vs. R, 
-            axp1.plot(R, p/max(p), 'b-', label="norm. p(R)")
-            axp1.plot(R, jphi/max(jphi),'r-',label=r"norm. $j_\phi(R)$")
+            axp1.plot(self.Rmid, self.p/max(self.p), 'b-', label="norm. p(R)")
+            axp1.plot(self.Rmid, self.jphi_avg/max(self.jphi_avg),'r-',label=r"norm. $j_\phi(R)$")
             axp1.legend()
             axp1.set_xlabel("R [m] (midplane)")
             fig.tight_layout()
@@ -230,26 +239,26 @@ class GFeq(object):
             ax3 = fig.add_subplot(gs[0,2])
             ax4 = fig.add_subplot(gs[1,2])
             ax0.set_aspect("equal")
-            ax0.plot(Rs, Zs, 'r-',lw=2)
+            ax0.plot(self.Rms, self.Zms, 'r-',lw=2)
             ax0.set_xlabel("R [m]")
             ax0.set_ylabel("Z [m]")
             ctf = ax0.contourf(R,Z,Psi/Psi0,**ctf_kw)
             fig.colorbar(ctf, ax=ax0,label=r"Norm. pol. mag. flux $\psi = \Psi/\Psi_0$")#,orientation='horizontal')
             # For the pressure, assume the value is given in SI units,
-            ax1.plot(R, p, 'b-')
+            ax1.plot(self.Rmid, self.p, 'b-')
             ax1.set_ylabel("Plasma pressure [Pa]")
             ax1.set_xlabel("R [m] (midplane)")
             # For the Toroidal current density the SI units are [A]/[m]^2
-            ax2.plot(R, jphi, 'r-')
+            ax2.plot(self.Rmid, self.jphi_avg, 'r-')
             ax2.set_ylabel(r"Toroidal current density, $j_\phi$ [A/m$^2$]")
             ax2.set_xlabel("R [m] (midplane)")
             # Also show the pressure and q profile vs. psi,
-            ax3.plot(psi_n, p_psin, 'b-')
+            ax3.plot(self.psi_n, self.p, 'b-')
             ax3.set_ylabel("Plasma pressure [Pa]")
             if hasattr(self, "q0"):
                 ax4.plot(0,self.q0,'g P')
-            if get_qprofile:
-                ax4.plot(q_psin, q,'g-')
+            if hasattr(self, "q"):
+                ax4.plot(self.psi_n, self.q,'g-')
             ax4.set_ylabel(r"$q(\psi)$")
             for a in [ax3, ax4]:
                 a.set_xlabel(r"$\psi_n$")
@@ -257,57 +266,191 @@ class GFeq(object):
 
         return R, Z, Psi
     
-    def get_profiles(self, x):
+    def trace_surfaces(self, levels, Nx=257, Ny=257, jac_method='equal_arc', show_plot=True,):
         """
-        Method to obtain (radial/psi) profiles of various plasma equilibrium quantities.
-        Values are calculated using the get_psi() function evaluated along the midplane (y=0).
-
+        Method to trace flux surfaces (contours of constant \Psi) and compute 
+        additional derived quantities.
+        This function computes profiles of,        
+            r_min, rho, q
+        on the given 'levels' of psi_n.
+        
         Parameters
         ----------
-        x : np.1darray
-            Normalized radial coordiante, -1 <= x <= 1
-
-        Returns
-        -------
-        R : np.1darray
-            Major radius [m]
-        psi : np.1darray
-            normalized poloidal magnetic flux 1(core), 0(sep)
-        psi_n : np.1darray
-            normalized poloidal magnetic flux 0(core), 1(sep)
-        p : np.1darray
-            pressure over all 'R'
-        jphi : np.1darray
-            toroidal current density [A/m^2] vs. R
-        p_psin : np.1darray
-            pressure over 'psi_n'.
-            
+        levels : np.1darray
+            levels of normalized poloidal magnetic flux (psi_n)
+        
         """
-        # Compute R from x, 
-        r = 1 + self.eps**2 + 2*self.eps*x
-        R = self.R0*np.sqrt(r) # [m]
+        # Generate the 2D psi_n domain, 
+        x = np.linspace(-1, 1, Nx)
+        y = np.linspace(-self.kappa, self.kappa, Ny)
+        xx, yy = np.meshgrid(x, y)
+        psi_xy = self.get_psi(xx, yy, self.alpha)
+        psin_xy = -1*(psi_xy - 1) # 2D normalized psi_n
         
-        # 5.3 Profiles,
-        psi = self.get_psi(x, 0, self.alpha)
-        # analytic psi derivative of F2,
-        dF2_dpsi = (self.R0*self.B0)**2 * (4*self.dB/self.B0 * (psi/self.Psi0) )
+        # Preallocate quantities which require the surface to be parameterized,
+        Psi_1d = self.Psi0*(1-levels) # [m^2*T]
+        psi_1d = 1 - levels
+        q = np.zeros(len(levels))
+        rmin = np.zeros(len(levels))  # [m]
+        dPhi_dpsi = np.zeros(len(levels)) # used in the calculation of rho
+        dVol_dpsi = np.zeros(len(levels))
+        gpsi2_R2_avg = np.zeros(len(levels)) # used in the calculation of the toroidal current/density
+        
+        # Main output (added to class as attr),
+        self.flux_surfaces = []
+        
+        # Settings for the jacobian determinant, 
+        if jac_method == 'equal_arc':
+            l, m, n = 1, 1, 0
+        elif jac_method == 'boozer':
+            l, m, n = 0, 0, 2
+        elif jac_method == 'hamada':
+            l, m, n = 0, 0, 0
+        
+        # Interpolants for measure.find_contours()
+        fx = interp1d(np.arange(0,len(x)), x)
+        fy = interp1d(np.arange(0,len(y)), y)            
+        if show_plot:
+            fig, (ax0, ax1) = plt.subplots(1,2,num="GFeq.trace_surfaces")
+            norm = Normalize(0,1,clip=True)
+            cmap = plt.get_cmap('viridis')
+            cmap.set_under("w")
+            colors = cmap(np.linspace(0,1,len(levels)))
+            cnt = ax0.contour(x,y,psin_xy,levels=levels,
+                              norm=norm,cmap=cmap,zorder=1)
+            fig.colorbar(cnt,ax=ax0,label=r"$\psi$")
+            ax0.set_aspect("equal")
+            ax0.set_xlabel("x")
+            ax0.set_ylabel("y")
+            ax0.plot([],[],'k-',label="plt.contour")
+            ax0.plot([],[],'k--',label='measure.find_contours')
+            ax0.legend()
+            
+        print("INFO: tracing flux surfaces...")
+        # Iterate over psi_n values,
+        for i, p in enumerate(levels):
+            print(f"* tracing psi_n={p:.2f}")
+            # Extract contours for these values,
+            contours = measure.find_contours(psin_xy, p)
+            # Interpolate indices to get xc, yc points...
+            yc = fy(contours[0][:,0])
+            xc = fx(contours[0][:,1])
+            if show_plot:
+                ax0.plot(xc, yc,'--',color=colors[i],zorder=2)
+            # Compute the geometric theta (NOT a flux coordinate)
+            ti = np.arctan2(yc,xc)
+            # Orient the flux surface using \theta,
+            srt_inds = np.argsort(ti)
+            xc = xc[srt_inds]
+            yc = yc[srt_inds]
+            ti = ti[srt_inds]
+            ti, uinds = np.unique(ti, return_index=True)
+            # The flux surface coords are [xc, yc] in normalized space
+            xc = xc[uinds]
+            yc = yc[uinds]
+            # Compute 'r' for all values of xc, 
+            r =  1 + self.eps**2 + 2*self.eps*xc
+            # The flux surface has coordinates [Rc, Zc] in real-space,
+            Rc = self.R0*np.sqrt(r)  # [m]
+            a = self.eps*self.R0
+            Zc = a*yc # [m]
+            
+            # ----------------
+            # Calculation of the poloidal arc length,
+            dRc = np.ediff1d(Rc, to_begin=0)
+            dZc = np.ediff1d(Zc, to_begin=0)
+            dlp = np.sqrt( dRc**2 + dZc**2 ) # [m]
+            lp = np.cumsum(dlp) # [m]
+            
+            # Get the /derivative/ of psi along each contour,
+            psip_x, psip_y = self.get_psip(xc, yc, self.alpha)            
+            
+            # ----------------
+            # Calculation of the magnetic field on this flux surface,
+            B_R = -self.Psi0/(a*Rc)*psip_y #[T]
+            B_Z = self.Psi0/(Rc**2*self.eps)*psip_x # [T]
+            B_phi = self.F(psi_1d[i])/Rc
+            Bp_mag = np.sqrt(B_R**2 + B_Z**2)
+            B_mag = np.sqrt( Bp_mag**2 + B_phi**2 )
+            
+            # ----------------
+            # Calculation of the poloidal angle (fs coord.)
+            grad_psi_mag = Rc*Bp_mag
+            J = Rc**l/grad_psi_mag**m/B_mag**n # eq. 235 of [3]
+            dtheta = Rc/(J*grad_psi_mag) * dlp # eq. 214 of [3]
+            theta = np.cumsum(dtheta) # [rad]
+            dxdt = np.gradient(xc, theta)
+            dydt = np.gradient(yc, theta)
+                        
+            # ----------------
+            # Calculation of q,
+            # Integrand in eq. 6.11 of [1]
+            integrand = np.sqrt( (dxdt**2 + r*dydt**2)/(psip_y**2 + r*psip_x**2) )/r
+            I = np.trapz(integrand, theta) # integrate over thetas
+            q[i] = self.F(psi_1d[i])/(self.R0*self.B0)*sqrt(self.nu/self.beta0)*self.eps*self.alpha/(2*pi)*I
+            # ----------------
+            # Calculation of geometry params,
+            rmin[i] = 0.5*(np.max(Rc) - np.min(Rc)) # GACODE definition [m]
+            Vprime = 2*pi*np.trapz(J,theta) # eq. 271 of [3]
+            dVol_dpsi[i] = Vprime
+            # ----------------
+            fs_avg = lambda y: 2*pi/Vprime * np.trapz(J*y,theta)
+            gpsi2_R2_avg[i] = fs_avg(grad_psi_mag**2/Rc**2)
+            # ----------------
+            # Calculation of the differential toroidal magnetic flux,
+            integrand = self.F(psi_1d[i])/Rc**2 * J
+            dPhi_dpsi[i] = np.trapz(integrand, theta) # eq. 284 of [3]
+            # Assemble outputs, 
+            out = dict(R=Rc, 
+                       Z=Zc,
+                       theta=theta,
+                       lp=lp,
+                       Bp_mag=Bp_mag, 
+                       B_mag=B_mag,
+                       )
+            self.flux_surfaces += [out]
+        
+        # toroidal magnetic flux,
+        Phi = cumulative_trapezoid(dPhi_dpsi,levels)
+        Phi = np.insert(Phi, 0, 0)
+        rho = np.sqrt( Phi/Phi[-1] )
+        # toroidal current density (fs. avg.) eq. 293 of [3]
+        arg = np.gradient(Psi_1d,levels)*dVol_dpsi*gpsi2_R2_avg
+        jphi_avg = 1/self.mu0/dVol_dpsi*np.gradient(arg,levels) # [A/m2]
+        
+        # Add additional outputs,
+        self.psi_n = levels
+        self.rho = rho
+        self.rmin = rmin
+        self.q = q
+        self.Psi = Psi_1d
+        self.Phi = Phi
+        self.jphi_avg = jphi_avg
+        self.Rmid = np.array([np.max(fs['R']) for fs in self.flux_surfaces])
+        
+        # Additional calculated profiles, 
+        # analytic psi derivative of F^2 = 2FFprime
+        dF2_dpsi = (self.R0*self.B0)**2 * (4*self.dB/self.B0 * (Psi_1d/self.Psi0) )
+        self.fpol = self.F(Psi_1d/self.Psi0)
+        self.ffprime = 0.5*dF2_dpsi
         # Compute the plasma pressure -- eq. 2.2 of [1]
-        p = self.p0*(psi)**2
-        dp_dpsi = 2*self.p0*(psi/self.Psi0) # analytic deriv.
+        self.p = self.p0*(Psi_1d/self.Psi0)**2
+        self.pprime = 2*self.p0*(Psi_1d/self.Psi0) # analytic deriv.
         # Compute the toroidal current density,
-        jphi = R*dp_dpsi + 0.5/(R*self.mu0)*dF2_dpsi # [A/m^2]
+        #jphi = R*dp_dpsi + 0.5/(R*self.mu0)*dF2_dpsi # [A/m^2]
+            
+        if show_plot:
+            # flip psi so core = 0, sep = 1...
+            ax1.plot(levels, q,'g-')
+            ax1.plot(levels, rho, 'r-')
+            ax1.set_xlabel(r"$\psi_n$") # core = 0, sep = 1.
+            ax1.set_ylabel(r"$q(\psi)$")
+            if hasattr(self, 'q0'):
+                ax1.plot(0, self.q0,'g P')
+            fig.tight_layout()
         
-        core_ind = np.argmin(np.abs(psi - 1.))
-        #bndry_ind = np.argmin(np.abs(psi))
-        # define the standard \psi_n (normalized poloidal magnetic flux) over
-        # the entire midplane.
-        psi_n = -1*(psi - 1)
-        psi_n = psi_n[core_ind:]
-        
-        p_psin = p[core_ind:]
-        
-        return R, psi, psi_n, p, jphi, p_psin
-    
+        return
+      
     def get_B(self, Nx=257, Ny=257):
         """
         Method to return the components of the magnetic field over an R,Z grid.
@@ -340,12 +483,13 @@ class GFeq(object):
         
         B_R = -self.Psi0/(a*R)*psi_y #[T]
         B_Z = self.Psi0/(R**2*self.eps)*psi_x # [T]
-        B_phi = self.F(self.Psi0*self.get_psi(xx,yy,self.alpha))/R
+        B_phi = self.F(self.get_psi(xx,yy,self.alpha))/R
         
         return B_R, B_phi, B_Z, R, Z
         
     def get_plasma_params(self, x, y):
         """ Method to evaluate various plasma parameters from Sec. 6 of [1]
+        This method generally deals with 0D (global) params of the plasma.
         """
         xx, yy = np.meshgrid(x,y)
         psi_xy = self.get_psi(xx, yy, self.alpha)
@@ -389,8 +533,11 @@ class GFeq(object):
         # Add class attrs, 
         self.I = I
         self.q0 = q0
+        self.beta_tor = beta_tor
+        self.beta_pol = beta_pol
+        self.li = li
         
-        return I, q0
+        return I, q0, beta_tor, beta_pol, li
   
     def F(self, psi):
         """
@@ -404,93 +551,7 @@ class GFeq(object):
 
         """
         return self.R0*self.B0*np.sqrt(1 + 2*self.dB/self.B0*psi**2)
-    
-    def get_qprofile(self,x,y,psi_min=0.05,show_plot=True):
-        """
-        Method to evaluate the q(psi) profile from psi_min to 1-psi_min.
-        This method can be time consuming because it involves tracing flux surfaces.
         
-        Parameters
-        ----------
-        psi_min : float, optional
-            Minimum value of psi_min for flux surface tracing. 
-            The default is 0.05.
-
-        Returns
-        -------
-        q : np.1darray
-            Saftey factor
-        psi_val : np.1darray
-            Psi values matching the q profile.
-
-        """
-        xx, yy = np.meshgrid(x, y)
-        psi_xy = self.get_psi(xx, yy, self.alpha)
-        # Computing the q-profile requires parameterized of the flux surfaces.
-        # recall: psi = 0 is the separatrix.
-        psi_vals = np.arange(psi_min, 1, psi_min)
-        q = np.zeros(len(psi_vals))
-        # Functions needed for measure.find_contours()
-        fx = interp1d(np.arange(0,len(x)), x)
-        fy = interp1d(np.arange(0,len(y)), y)            
-        if show_plot:
-            fig, (ax0, ax1) = plt.subplots(1,2,num="GFeq.get_qprofile")
-            norm = Normalize(0,1,clip=True)
-            cmap = plt.get_cmap('viridis')
-            cmap.set_under("w")
-            colors = cmap(np.linspace(0,1,len(psi_vals)))
-            cnt = ax0.contour(x,y,psi_xy,levels=psi_vals,
-                              norm=norm,cmap=cmap,zorder=1)
-            fig.colorbar(cnt,ax=ax0,label=r"$\psi$")
-            ax0.set_aspect("equal")
-            ax0.set_xlabel("x")
-            ax0.set_ylabel("y")
-            ax0.plot([],[],'k-',label="plt.contour")
-            ax0.plot([],[],'k--',label='measure.find_contours')
-            ax0.legend()
-        print("INFO: calculating q-profile...")
-        for i, p in enumerate(psi_vals):
-            print(f"* tracing flux surface for psi={p:.2f}")
-            # Extract contours for these values,
-            contours = measure.find_contours(psi_xy, p)
-            # Interpolate indices to get xc, yc points...
-            yc = fy(contours[0][:,0])
-            xc = fx(contours[0][:,1])
-            if show_plot:
-                ax0.plot(xc, yc,'--',color=colors[i],zorder=2)
-            ti = np.arctan2(yc,xc)
-            srt_inds = np.argsort(ti)
-            xc = xc[srt_inds]
-            yc = yc[srt_inds]
-            ti = ti[srt_inds]
-            ti, uinds = np.unique(ti, return_index=True)
-            xc = xc[uinds]
-            yc = yc[uinds]
-            print(f"* contour has {len(xc)} unique points")
-            dxdt = np.gradient(xc, ti)
-            dydt = np.gradient(yc, ti)
-            # Get the /derivative/ of psi along each contour,
-            psip_x, psip_y = self.get_psip(xc, yc, self.alpha)
-            # Compute 'r' for all values of xc, 
-            r =  1 + self.eps**2 + 2*self.eps*xc
-            # Integrand in eq. 6.11 of [1]
-            integrand = np.sqrt( (dxdt**2 + r*dydt**2)/(psip_y**2 + r*psip_x**2) )/r
-            I = np.trapz(integrand, ti) # integrate over thetas
-            q[i] = self.F(p)/(self.R0*self.B0)*sqrt(self.nu/self.beta0)*self.eps*self.alpha/(2*pi)*I
-            print(f"* local q = {q[i]:.3f}")
-            
-        if show_plot:
-            # flip psi so core = 0, sep = 1...
-            ax1.plot(1-psi_vals, q,'g-')
-            ax1.set_xlabel(r"$\psi_n$") # core = 0, sep = 1.
-            ax1.set_ylabel(r"$q(\psi)$")
-            if hasattr(self, 'q0'):
-                ax1.plot(0, self.q0,'g P')
-            fig.tight_layout()
-    
-        return q, psi_vals
-        
-    
     def get_psi(self, x, y, alpha):
         """
         Normalized magnetic flux over normalized spatial grids x, y.
@@ -760,8 +821,7 @@ class GFeq(object):
             A[5,si,:] = -self.Lam2*self.Sp(1,n,alpha) - self.hn(n,alpha)**2*self.S(1, n, alpha)
                 
         return A, b
-        
-    
+           
     def plot_CS(self, x, n, alpha, axC=None,axS=None):
         """
         Method to plot the sine/cosine-like functions Cn(x), Sn(x).
@@ -879,7 +939,6 @@ class GFeq(object):
         pre = -(self.kn(n,alpha)**2 + lam2*x)/(1 + self.eps_hat*x)
         return pre*self.S(x,n,alpha)
         
-   
     def coeffs(self, n, alpha, a0=1,b0=0):
         """ Coefficients of the Cn(x), Sn(x) expansions.
         a0, b0 set the starting values, a1,b1,a2,b2 = 0 always.
@@ -902,6 +961,137 @@ class GFeq(object):
                         -2*self.eps_hat*(m-2)*kn*a[m-2] )
         
         return a, b
+    
+    def write_geqdsk(self,R0,B0,p0,Rpad=0.2,Zpad=0.1,nr=65,nz=65,filename="GFeq.geqdsk",**kwargs):
+        """
+        Method to write the magnetic equilibrium into the gEQDSK file format.
+        See: https://w3.pppl.gov/ntcc/TORAY/G_EQDSK.pdf
+        
+        Example, 
+            eq = GFeq(eps, kappa, delta, nu)
+            eq.write_geqdsk(R0, B0, p0)
+
+        Parameters
+        ----------
+        R0 : float 
+            Major radius of B0 [R]
+        B0 : float 
+            Vacuum magnetic field [T]
+        p0 : float
+            On-axis pressure [Pa]
+        Rpad : float
+            R distance to pad from boundary for 'limiter'
+        Zpad : float
+            Z distance '''
+        nr : int
+            Number of radial grid points (nw)
+        nz : int
+            Number of z grid points (nh)
+        filename: str
+            Filename of gEQDSK file (written to home directory)
+            
+        **kwargs passed to get_PsiRZ method.
+        """
+        # 1. Compute the 2D Psi (high resolution)
+        psi_n = np.linspace(0, 1, nr)
+        R, Z, Psi = self.get_PsiRZ(R0,B0,p0, Nx=nr, Ny=nz,
+                                 levels=psi_n,do_trace=True, **kwargs)
+        # NOTE: Psi has shape: [Z, R]
+        # 2. Perform a 2D interpolation onto a lower-res 'EFIT'-type grid,
+        Rlim = [np.min(R) - Rpad, np.max(R) + Rpad]
+        Zlim = [np.min(Z) - Zpad, np.max(Z) + Zpad]
+        R_grid = np.linspace(*Rlim, nr)
+        Z_grid = np.linspace(*Zlim, nz)
+        Psi_map = RegularGridInterpolator((R,Z), Psi.T, 
+                                          bounds_error=False, 
+                                          fill_value=0.0)
+        
+        RR, ZZ = np.meshgrid(R_grid, Z_grid,indexing='xy')
+        grid = np.array([RR.ravel(), ZZ.ravel()]).T # [nz, nr]
+        PSIRZ = Psi_map(grid).reshape(nz,nr) # [nz, nr]
+        # Invalid values outside of separatrix are set to 0
+        PSIRZ[PSIRZ < 0] = 0
+        
+        # 3. Extract other profiles, etc.
+        rmaxis = self.Rmaxis
+        zmaxis = self.Zmaxis
+        rdim = Rlim[1] - Rlim[0]
+        rleft = Rlim[0]
+        rcentr = self.R0
+        bcentr = self.B0
+        zdim = Zlim[1] - Zlim[0]
+        zmid = 0 # 
+        current = self.I
+        simag =  self.Psi0 # poloidal flux on the magnetic axis
+        sibry = 0.0 # by construction
+        FPOL = self.fpol
+        ffprime = self.ffprime
+        PRES = self.p
+        pprime = self.pprime
+        QPSI = self.q
+        RBBBS = self.Rms
+        ZBBBS = self.Zms
+        dum = 0
+        # the limiter is taken to be the rectangle padding the equilibrium,
+        RLIM = np.array([Rlim[0], Rlim[1], Rlim[1], Rlim[0], Rlim[0]])
+        ZLIM = np.array([Zlim[0], Zlim[0], Zlim[1], Zlim[1], Zlim[0]])
+            
+        with open(filename, 'w') as f:
+            f.write(f" {'GFgEQDSK':<48}{dum}{nr:5d}{nz:5d}\n")
+            # rdim, zdim, rcentr, rleft, zmid
+            f.write(f" {rdim:.9e} {zdim:.9e} {rcentr:.9e} {rleft:.9e} {zmid:.9e}\n")
+            # rmaxis, zmaxis, simag, sibry, bcentr
+            f.write(f" {rmaxis:.9e} {zmaxis:.9e} {simag:.9e} {sibry:.9e} {bcentr:.9e}\n")
+            # current, simag, xdum, rmaxis, xdum
+            f.write(f" {current:.9e} {simag:.9e} {dum:.9e} {rmaxis:.9e} {dum:.9e}\n")
+            # zmaxis, xdum, sibry, xdum, xdum
+            f.write(f" {zmaxis:.9e} {dum:.9e} {sibry:.9e} {dum:.9e} {dum:.9e}\n")
+            
+            # Write fpol
+            for i in range(0, len(FPOL), 5):
+                line = ''.join(f"{val: .9e}" for val in FPOL[i:i+5])
+                f.write(line + '\n')
+            
+            # Write pressure
+            for i in range(0, len(PRES), 5):
+                line = ''.join(f"{val: .9e}" for val in PRES[i:i+5])
+                f.write(line + '\n')
+    
+            # Write FF'
+            for i in range(0, len(ffprime), 5):
+                line = ''.join(f"{val: .9e}" for val in ffprime[i:i+5])
+                f.write(line + '\n')
+            
+            # Write pressure'
+            for i in range(0, len(pprime), 5):
+                line = ''.join(f"{val: .9e}" for val in pprime[i:i+5])
+                f.write(line + '\n')
+            
+            # Write poloidal flux grid (psirz): should be [nz, nr]
+            psirz_flat = PSIRZ.flatten()  # Fortran-order
+            for i in range(0, len(psirz_flat), 5):
+                line = ''.join(f"{val: .9e}" for val in psirz_flat[i:i+5])
+                f.write(line + '\n')
+            
+            # Write q-profile
+            for i in range(0, len(QPSI), 5):
+                line = ''.join(f"{val: .9e}" for val in QPSI[i:i+5])
+                f.write(line + '\n')
+    
+            # Plasma boundary points
+            nbbbs = len(RBBBS)
+            nlim = len(RLIM)
+            f.write(f" {nbbbs:5d} {nlim:5d}\n")
+            
+            bbs = np.stack([RBBBS, ZBBBS]).flatten(order='F')
+            lim = np.stack([RLIM, ZLIM]).flatten(order='F')
+            
+            for i in range(0, 2*nbbbs, 5):
+                line = ''.join(f"{val: .9e}" for val in bbs[i:i+5])
+                f.write(line + '\n')
+            for i in range(0, 2*nlim, 5):
+                line = ''.join(f"{val: .9e}" for val in lim[i:i+5])
+                f.write(line + '\n')
 
 if __name__ == "__main__":   
     write_output_file = False
@@ -928,13 +1118,14 @@ if __name__ == "__main__":
     # %% Main routine,
     # Note: bypass the determination of alpha by providing alpha as kwarg.
     #       otherwise set almin, almax kwargs to bound the get_alpha method. 
-    R, Z, Psi = eq.get_PsiRZ(R0, B0, p0, almin=1.8, almax=2.0, get_qprofile=True)
+    R, Z, Psi = eq.get_PsiRZ(R0, B0, p0, almin=1.8, almax=2.0, do_trace=True)
     
     # %% Analysis of profiles,
     # Create a normalized radial array,
     x = np.linspace(-1,1,257)
     # Run the get_profiles routine,
-    R, psi, psi_n, p, jphi, p_psin = eq.get_profiles(x)
+    p_psin = eq.p
+    psi_n = eq.psi_n
     # Convert the pressure profile to [keV * E19/m^3]
     p = p_psin/1602.2
     # Plot, 
@@ -987,3 +1178,8 @@ if __name__ == "__main__":
                    data,
                    header="R,Z,ne,Bx,By,Bz",delimiter=",",comments="%",
                    )
+        
+        # Also write a gEQDSK file,
+        kw = dict(almin=1.8, almax=2.0,show_plot=False)
+        eq.write_geqdsk(R0, B0, p0, **kw)
+   
