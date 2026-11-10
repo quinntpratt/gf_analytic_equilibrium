@@ -368,7 +368,7 @@ Input params
             # ----------------
             # Calculation of the magnetic field on this flux surface,
             B_R = -self.Psi0/(a*Rc)*psip_y #[T]
-            B_Z = self.Psi0/(Rc**2*self.eps)*psip_x # [T]
+            B_Z = self.Psi0/(self.R0**2*self.eps)*psip_x # [T]
             B_phi = self.F(psi_1d[i])/Rc
             Bp_mag = np.sqrt(B_R**2 + B_Z**2)
             B_mag = np.sqrt( Bp_mag**2 + B_phi**2 )
@@ -482,7 +482,7 @@ Input params
         psi_x, psi_y = self.get_psip(xx,yy,self.alpha)
         
         B_R = -self.Psi0/(a*R)*psi_y #[T]
-        B_Z = self.Psi0/(R**2*self.eps)*psi_x # [T]
+        B_Z = self.Psi0/(self.R0**2*self.eps)*psi_x # [T]
         B_phi = self.F(self.get_psi(xx,yy,self.alpha))/R
         
         return B_R, B_phi, B_Z, R, Z
