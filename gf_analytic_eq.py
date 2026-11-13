@@ -15,19 +15,19 @@ In this program we create up/down symmetric equilibria with model flux surfaces
 based on the Miller geometry [2]. 
 Flux surface shapes are characterized with 
 scalars: eps = a/R0 (inverse aspect ratio), kappa (elongation), and delta 
-(triangularity). The parameter \nu is related to the poloidal beta.
+(triangularity). The parameter nu is related to the poloidal beta.
 
 The 'free functions' -- plasma pressure, p, and ff' -- are restricted to  
-quadratic functions of \Psi. 
+quadratic functions of Psi. 
 
-To compute the poloidal magnetic flux, \Psi(R, Z), three additional parameters
+To compute the poloidal magnetic flux, Psi(R, Z), three additional parameters
 are required: 
     (1) the vacuum toroidal field (B0)  
     (2) the on-axis plasma pressure (p0)
     (3) the axial major radius (R0)
     
 Flux surface tracing has been implemented to calculate the q-profile as well 
-as the toroidal magnetic flux (and \rho = sqrt(Phi/Phi_bndry)).
+as the toroidal magnetic flux (and rho = sqrt(Phi/Phi_bndry)).
 
 References
 ----------
@@ -155,7 +155,7 @@ Input params
         self.alpha = alpha
         
         # (Optional) Verify that alpha is a solution to the GS equation with:
-        # self.check_GS(xx,yy,alpha)
+        self.check_GS(xx,yy,alpha)
         
         # 2. Compute the 2D normalized psi(x,y) = Psi/Psi0
         psi_xy = self.get_psi(xx,yy,alpha)
@@ -368,7 +368,7 @@ Input params
             # ----------------
             # Calculation of the magnetic field on this flux surface,
             B_R = -self.Psi0/(a*Rc)*psip_y #[T]
-            B_Z = self.Psi0/(Rc**2*self.eps)*psip_x # [T]
+            B_Z = self.Psi0/(self.R0**2*self.eps)*psip_x # [T]
             B_phi = self.F(psi_1d[i])/Rc
             Bp_mag = np.sqrt(B_R**2 + B_Z**2)
             B_mag = np.sqrt( Bp_mag**2 + B_phi**2 )
@@ -386,20 +386,20 @@ Input params
             # Calculation of q,
             # Integrand in eq. 6.11 of [1]
             integrand = np.sqrt( (dxdt**2 + r*dydt**2)/(psip_y**2 + r*psip_x**2) )/r
-            I = np.trapz(integrand, theta) # integrate over thetas
+            I = np.trapezoid(integrand, theta) # integrate over thetas
             q[i] = self.F(psi_1d[i])/(self.R0*self.B0)*sqrt(self.nu/self.beta0)*self.eps*self.alpha/(2*pi)*I
             # ----------------
             # Calculation of geometry params,
             rmin[i] = 0.5*(np.max(Rc) - np.min(Rc)) # GACODE definition [m]
-            Vprime = 2*pi*np.trapz(J,theta) # eq. 271 of [3]
+            Vprime = 2*pi*np.trapezoid(J,theta) # eq. 271 of [3]
             dVol_dpsi[i] = Vprime
             # ----------------
-            fs_avg = lambda y: 2*pi/Vprime * np.trapz(J*y,theta)
+            fs_avg = lambda y: 2*pi/Vprime * np.trapezoid(J*y,theta)
             gpsi2_R2_avg[i] = fs_avg(grad_psi_mag**2/Rc**2)
             # ----------------
             # Calculation of the differential toroidal magnetic flux,
             integrand = self.F(psi_1d[i])/Rc**2 * J
-            dPhi_dpsi[i] = np.trapz(integrand, theta) # eq. 284 of [3]
+            dPhi_dpsi[i] = np.trapezoid(integrand, theta) # eq. 284 of [3]
             # Assemble outputs, 
             out = dict(R=Rc, 
                        Z=Zc,
@@ -482,7 +482,7 @@ Input params
         psi_x, psi_y = self.get_psip(xx,yy,self.alpha)
         
         B_R = -self.Psi0/(a*R)*psi_y #[T]
-        B_Z = self.Psi0/(R**2*self.eps)*psi_x # [T]
+        B_Z = self.Psi0/(self.R0**2*self.eps)*psi_x # [T]
         B_phi = self.F(self.get_psi(xx,yy,self.alpha))/R
         
         return B_R, B_phi, B_Z, R, Z
@@ -497,15 +497,15 @@ Input params
         # Toroidal plasma current, I, eq. 6.8 of [1]
         integrand = (1 + self.nu*self.eps_hat*xx)/(1 + self.eps_hat*xx)*psi_xy
         integrand2 = (1 + self.nu*self.eps_hat*xx)/(1 + self.eps_hat*xx)*psi_xy**2
-        integral = np.trapz(np.trapz(integrand,y,axis=0), x)
-        integral2 = np.trapz(np.trapz(integrand2,y,axis=0), x)
+        integral = np.trapezoid(np.trapezoid(integrand,y,axis=0), x)
+        integral2 = np.trapezoid(np.trapezoid(integrand2,y,axis=0), x)
         pre = self.eps*self.B0*self.R0*self.alpha*sqrt(self.beta0/self.nu)
         I = pre*integral/self.mu0
         print(f"INFO: Toroidal plasma current, I = {I/1E6:.3f} [MA]")
         
         # Volume-averaged toroidal \beta, eq. 6.6 of [1]
-        psi2int = np.trapz(np.trapz(psi_xy**2,y,axis=0), x) # psi^2 dxdy
-        denom = np.trapz(np.trapz(0*xx+1.,y,axis=0), x) # dxdy
+        psi2int = np.trapezoid(np.trapezoid(psi_xy**2,y,axis=0), x) # psi^2 dxdy
+        denom = np.trapezoid(np.trapezoid(0*xx+1.,y,axis=0), x) # dxdy
         beta_tor = self.beta0 * psi2int/denom
         print(f"INFO: Volume-averaged toroidal beta = {beta_tor:.3f}")
         
@@ -1102,7 +1102,7 @@ if __name__ == "__main__":
              "ellipse":dict(eps=0.25,kappa=2,delta=0,nu=1), # alpha = 1.8724
              "D":dict(eps=0.33, kappa=1.8, delta=0.4, nu=0.3), # alpha = 1.9057
              "negD":dict(eps=0.33, kappa=1.9, delta=-0.6, nu=0.5), # alpha = 1.8744 
-             "NSTX":dict(eps=1/1.31, kappa=2,delta=0.4, nu=1), # alpha=1.9252
+             "NSTX":dict(eps=1/1.31, kappa=2,delta=0.4, nu=0.5), # alpha=1.9252
              }
     
     # Create an instance of the GF equilibrium.
@@ -1182,4 +1182,6 @@ if __name__ == "__main__":
         # Also write a gEQDSK file,
         kw = dict(almin=1.8, almax=2.0,show_plot=False)
         eq.write_geqdsk(R0, B0, p0, **kw)
+
+    plt.show()
    
