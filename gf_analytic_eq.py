@@ -50,7 +50,7 @@ from skimage import measure
 from pathlib import Path
 
 class GFeq(object):
-    def __init__(self, eps=0.33, kappa=1, delta=0, nu=1):
+    def __init__(self, eps=0.33, kappa=1, delta=0, nu=1, config='limiter', kappa_X=None, delta_X=None):
         """
         Guazzotto-Freidberg plasma equilibrium.
 
@@ -64,21 +64,56 @@ class GFeq(object):
             Triangularity.
         nu : float
             Related to \beta_p.
-
+        config : str
+            'limiter', 'double-null', or 'single-null'.
+        kappa_X : float
+            Elongation at X-point (for divertor configs).
+        delta_X : float
+            Triangularity at X-point (for divertor configs).
         """
         # Input parameters,
         self.eps = eps
         self.kappa = kappa
         self.delta = delta
         self.nu = nu
+        self.config = config
+        self.kappa_X = kappa_X
+        self.delta_X = delta_X
+
         # Quantities used in the GS solution, 
         self.eps_hat = 2*self.eps/(1 + self.eps**2) # eq. 2.9 of [1]
-        self.delta_hat = np.arcsin(self.delta) # under eq. 3.4 of [1]
-        self.xd = self.delta + 0.5*self.eps*(1 - self.delta**2) # under eq. 3.5 of [1]
-        # Equation 3.8 of [1],
-        self.Lam1 = (1 - self.eps)*(1 - self.delta_hat)**2/self.kappa**2
-        self.Lam2 = (1 + self.eps)*(1 + self.delta_hat)**2/self.kappa**2
-        self.Lam3 = self.kappa/( (1 - self.eps*self.delta)**2*(1 - self.delta**2) )
+        
+        if self.config == 'limiter':
+            self.delta_hat = np.arcsin(self.delta)
+            self.xd = self.delta + 0.5*self.eps*(1 - self.delta**2)
+            self.Lam1 = (1 - self.eps)*(1 - self.delta_hat)**2/self.kappa**2
+            self.Lam2 = (1 + self.eps)*(1 + self.delta_hat)**2/self.kappa**2
+            self.Lam3 = self.kappa/( (1 - self.eps*self.delta)**2*(1 - self.delta**2) )
+        elif self.config == 'double-null':
+            if self.kappa_X is None or self.delta_X is None:
+                raise ValueError("kappa_X and delta_X must be provided for double-null config.")
+            self.x_X = self.delta_X + 0.5*self.eps*(1 - self.delta_X**2)
+            self.xi = np.sqrt(1 - self.delta_X**2) / (self.kappa_X - np.sqrt(1 - self.delta_X**2))
+            self.Lam1 = (1 - self.eps)*(1 - self.delta_X)*(1 + self.xi)/self.kappa_X**2
+            self.Lam2 = (1 + self.eps)*(1 + self.delta_X)*(1 + self.xi)/self.kappa_X**2
+            self.Lam3 = 0.0 # Unused in double-null
+        elif self.config == 'single-null':
+            if self.kappa_X is None or self.delta_X is None:
+                raise ValueError("kappa_X and delta_X must be provided for single-null config.")
+            self.delta_hat = np.arcsin(self.delta)
+            self.xd = self.delta + 0.5*self.eps*(1 - self.delta**2)
+            self.x_X = self.delta_X + 0.5*self.eps*(1 - self.delta_X**2)
+            self.xi = np.sqrt(1 - self.delta_X**2) / (self.kappa_X - np.sqrt(1 - self.delta_X**2))
+            lam1_limiter = (1 - self.eps)*(1 - self.delta_hat)**2/self.kappa**2
+            lam2_limiter = (1 + self.eps)*(1 + self.delta_hat)**2/self.kappa**2
+            lam1_dn = (1 - self.eps)*(1 - self.delta_X)*(1 + self.xi)/self.kappa_X**2
+            lam2_dn = (1 + self.eps)*(1 + self.delta_X)*(1 + self.xi)/self.kappa_X**2
+            self.Lam1 = 0.5 * (lam1_limiter + lam1_dn)
+            self.Lam2 = 0.5 * (lam2_limiter + lam2_dn)
+            self.Lam3 = self.kappa/( (1 - self.eps*self.delta)**2*(1 - self.delta**2) )
+        else:
+            raise ValueError(f"Unknown config: {self.config}")
+
         # Physical constants,
         self.mu0 = 1.2566E-6 # vacuum perm. [m]*[kg]/[s]^2/[A]^2
         # Numerical controls, 
@@ -539,6 +574,26 @@ Input params
         
         return I, q0, beta_tor, beta_pol, li
   
+
+    def eval_term(self, func, x, y, n, is_sin, is_S, alpha):
+        hn = self.hn(n, alpha)
+        if func == 'psi':
+            y_term = np.sin(hn*y) if is_sin else np.cos(hn*y)
+            x_term = self.S(x, n, alpha) if is_S else self.C(x, n, alpha)
+        elif func == 'psi_x':
+            y_term = np.sin(hn*y) if is_sin else np.cos(hn*y)
+            x_term = self.Sp(x, n, alpha) if is_S else self.Cp(x, n, alpha)
+        elif func == 'psi_y':
+            y_term = hn * np.cos(hn*y) if is_sin else -hn * np.sin(hn*y)
+            x_term = self.S(x, n, alpha) if is_S else self.C(x, n, alpha)
+        elif func == 'psi_xx':
+            y_term = np.sin(hn*y) if is_sin else np.cos(hn*y)
+            x_term = self.Spp(x, n, alpha) if is_S else self.Cpp(x, n, alpha)
+        elif func == 'psi_yy':
+            y_term = -hn**2 * np.sin(hn*y) if is_sin else -hn**2 * np.cos(hn*y)
+            x_term = self.S(x, n, alpha) if is_S else self.C(x, n, alpha)
+        return y_term * x_term
+
     def F(self, psi):
         """
         Method to evaluate the 'free function', F(psi) = RBphi
@@ -555,106 +610,96 @@ Input params
     def get_psi(self, x, y, alpha):
         """
         Normalized magnetic flux over normalized spatial grids x, y.
-        Note: 0 <= psi(x,y) <= 1 on the interior of the solution domain.
-        And, psi(xs, ys) = 0.
-
-        Parameters
-        ----------
-        x : np.1darray
-            Normalized radial coordiate, -1 <= x <= 1
-        y : np.1darray
-            Normalized vertical coordiante, -kappa <= y <= kappa
-
-        Returns
-        -------
-        psi_xy : np.2darray
-            Normalized magnetic flux with shape [Ny, Nx]
         """
-        # Set up and solve the linear system: Au = b
         a = np.atleast_1d(alpha)
-        A, b = self.Ab(a) # A : (6,6,1), b : (6,1)
-        u = solve(A[:,:,0],b[:,0]) # u = [c2, s2, c3, s3, c4, s4]
-        # Equation 3.2 of [1],
-        psi_xy = np.cos(self.hn(1,alpha)*y)*self.C(x, 1, alpha)
-        psi_00 = self.C(0,1,alpha)
-        for i, n in zip([0,2,4],[2,3,4]):
-            psi_xy += np.cos(self.hn(n,alpha)*y)*( u[i]*self.C(x,n,alpha) + \
-                                                u[i+1]*self.S(x,n,alpha) )
-            psi_00 += u[i]*self.C(0,n,alpha) + u[i+1]*self.S(0,n,alpha)
+        A, b = self.Ab(a)
+        u = np.linalg.solve(A[:,:,0], b[:,0])
         
-        # Re-scale the eigenfunction to have psi(0,0) = 1,
+        psi_xy = self.eval_term('psi', x, y, 1, False, False, alpha)
+        psi_00 = self.eval_term('psi', 0, 0, 1, False, False, alpha)
+        
+        if self.config in ['limiter', 'double-null']:
+            for i, n in zip([0,2,4],[2,3,4]):
+                psi_xy += u[i] * self.eval_term('psi', x, y, n, False, False, alpha)
+                psi_xy += u[i+1] * self.eval_term('psi', x, y, n, False, True, alpha)
+                psi_00 += u[i] * self.eval_term('psi', 0, 0, n, False, False, alpha)
+                psi_00 += u[i+1] * self.eval_term('psi', 0, 0, n, False, True, alpha)
+        elif self.config == 'single-null':
+            u_map = [
+                (2, False, False), (2, False, True), (3, False, False), (3, False, True), 
+                (4, False, False), (4, False, True), (1, True, False), (2, True, False), 
+                (2, True, True), (3, True, False), (3, True, True),
+            ]
+            for idx, (n, is_sin, is_S) in enumerate(u_map):
+                psi_xy += u[idx] * self.eval_term('psi', x, y, n, is_sin, is_S, alpha)
+                psi_00 += u[idx] * self.eval_term('psi', 0, 0, n, is_sin, is_S, alpha)
+                
         return psi_xy/psi_00
     
     def get_psip(self, x, y, alpha):
         """
         First derivatives of the normalized poloidal magnetic flux.
-
-        Parameters
-        ----------
-        x : np.1darray
-            Normalized radial coordiate, -1 <= x <= 1
-        y : np.1darray
-            Normalized vertical coordiante, -kappa <= y <= kappa
-
-        Returns
-        -------
-        psi_x : np.2darray
-            d\psi/dx over x,y
-        psi_y :
-            d\psi/dy over x,y
         """
-        # precompute the expansion coefficients,
         a = np.atleast_1d(alpha)
-        A, b = self.Ab(a) # A : (6,6,1), b : (6,1)
-        u = solve(A[:,:,0],b[:,0]) # u = [c2, s2, c3, s3, c4, s4]
-
-        h1 = self.hn(1,alpha)
-        psi_x = np.cos(h1*y)*self.Cp(x, 1, alpha)
-        psi_y = -h1*np.sin(h1*y)*self.C(x, 1, alpha)
-        psi_00 = self.C(0,1,alpha) # value of psi(x,y) on-axis for renormalization
-        for i, n in zip([0,2,4],[2,3,4]):
-            hn = self.hn(n,alpha)
-            psi_x += np.cos(hn*y)*( u[i]*self.Cp(x,n,alpha) + \
-                                                u[i+1]*self.Sp(x,n,alpha) )
-            psi_y -= hn*np.sin(hn*y)*( u[i]*self.C(x,n,alpha) + \
-                                                u[i+1]*self.S(x,n,alpha) )
-            psi_00 += u[i]*self.C(0,n,alpha) + u[i+1]*self.S(0,n,alpha)
+        A, b = self.Ab(a)
+        u = np.linalg.solve(A[:,:,0], b[:,0])
+        
+        psi_x = self.eval_term('psi_x', x, y, 1, False, False, alpha)
+        psi_y = self.eval_term('psi_y', x, y, 1, False, False, alpha)
+        psi_00 = self.eval_term('psi', 0, 0, 1, False, False, alpha)
+        
+        if self.config in ['limiter', 'double-null']:
+            for i, n in zip([0,2,4],[2,3,4]):
+                psi_x += u[i] * self.eval_term('psi_x', x, y, n, False, False, alpha)
+                psi_x += u[i+1] * self.eval_term('psi_x', x, y, n, False, True, alpha)
+                psi_y += u[i] * self.eval_term('psi_y', x, y, n, False, False, alpha)
+                psi_y += u[i+1] * self.eval_term('psi_y', x, y, n, False, True, alpha)
+                psi_00 += u[i] * self.eval_term('psi', 0, 0, n, False, False, alpha)
+                psi_00 += u[i+1] * self.eval_term('psi', 0, 0, n, False, True, alpha)
+        elif self.config == 'single-null':
+            u_map = [
+                (2, False, False), (2, False, True), (3, False, False), (3, False, True), 
+                (4, False, False), (4, False, True), (1, True, False), (2, True, False), 
+                (2, True, True), (3, True, False), (3, True, True),
+            ]
+            for idx, (n, is_sin, is_S) in enumerate(u_map):
+                psi_x += u[idx] * self.eval_term('psi_x', x, y, n, is_sin, is_S, alpha)
+                psi_y += u[idx] * self.eval_term('psi_y', x, y, n, is_sin, is_S, alpha)
+                psi_00 += u[idx] * self.eval_term('psi', 0, 0, n, is_sin, is_S, alpha)
+                
         return psi_x/psi_00, psi_y/psi_00
     
     def get_psipp(self, x, y, alpha):
         """
         Second derivatives of the normalized poloidal magnetic flux.
-
-        Parameters
-        ----------
-        x : np.1darray
-            Normalized radial coordiate, -1 <= x <= 1
-        y : np.1darray
-            Normalized vertical coordiante, -kappa <= y <= kappa
-
-        Returns
-        -------
-        psi_xx : np.2darray
-            d^2\psi/dx^2 over x,y
-        psi_yy :
-            d^2\psi/dy^2 over x,y
         """
-        # precompute the expansion coefficients,
         a = np.atleast_1d(alpha)
-        A, b = self.Ab(a) # A : (6,6,1), b : (6,1)
-        u = solve(A[:,:,0],b[:,0]) # u = [c2, s2, c3, s3, c4, s4]
-        # grid,
-        h1 = self.hn(1,alpha)
-        psi_xx = np.cos(h1*y)*self.Cpp(x, 1, alpha)
-        psi_yy = -h1**2*np.cos(h1*y)*self.C(x, 1, alpha)
-        psi_00 = self.C(0,1,alpha) # value of psi(x,y) on-axis for renormalization
-        for i, n in zip([0,2,4],[2,3,4]):
-            hn = self.hn(n,alpha)
-            psi_xx += np.cos(hn*y)*( u[i]*self.Cpp(x,n,alpha) + \
-                                                u[i+1]*self.Spp(x,n,alpha) )
-            psi_yy -= hn**2*np.cos(hn*y)*( u[i]*self.C(x,n,alpha) + \
-                                                u[i+1]*self.S(x,n,alpha) )
-            psi_00 += u[i]*self.C(0,n,alpha) + u[i+1]*self.S(0,n,alpha)
+        A, b = self.Ab(a)
+        u = np.linalg.solve(A[:,:,0], b[:,0])
+        
+        psi_xx = self.eval_term('psi_xx', x, y, 1, False, False, alpha)
+        psi_yy = self.eval_term('psi_yy', x, y, 1, False, False, alpha)
+        psi_00 = self.eval_term('psi', 0, 0, 1, False, False, alpha)
+        
+        if self.config in ['limiter', 'double-null']:
+            for i, n in zip([0,2,4],[2,3,4]):
+                psi_xx += u[i] * self.eval_term('psi_xx', x, y, n, False, False, alpha)
+                psi_xx += u[i+1] * self.eval_term('psi_xx', x, y, n, False, True, alpha)
+                psi_yy += u[i] * self.eval_term('psi_yy', x, y, n, False, False, alpha)
+                psi_yy += u[i+1] * self.eval_term('psi_yy', x, y, n, False, True, alpha)
+                psi_00 += u[i] * self.eval_term('psi', 0, 0, n, False, False, alpha)
+                psi_00 += u[i+1] * self.eval_term('psi', 0, 0, n, False, True, alpha)
+        elif self.config == 'single-null':
+            u_map = [
+                (2, False, False), (2, False, True), (3, False, False), (3, False, True), 
+                (4, False, False), (4, False, True), (1, True, False), (2, True, False), 
+                (2, True, True), (3, True, False), (3, True, True),
+            ]
+            for idx, (n, is_sin, is_S) in enumerate(u_map):
+                psi_xx += u[idx] * self.eval_term('psi_xx', x, y, n, is_sin, is_S, alpha)
+                psi_yy += u[idx] * self.eval_term('psi_yy', x, y, n, is_sin, is_S, alpha)
+                psi_00 += u[idx] * self.eval_term('psi', 0, 0, n, is_sin, is_S, alpha)
+                
         return psi_xx/psi_00, psi_yy/psi_00
 
     def check_GS(self,x,y,alpha):
@@ -732,94 +777,138 @@ Input params
     def E(self, alpha):
         """
         Method corresponding to the minimization target, E(\alpha) = 0
-        cf. eq. 3.11 of [1]
-
-        Returns
-        -------
-        E(\alpha) : np.1darray
-            Error defined by eq. 3.11 of [1]
-
         """
         Na = len(alpha)
-        # 1. Solve the linear system in eq. 3.9 of [1],
-        A, b = self.Ab(alpha) # A : (6,6,Na), b : (6,Na)
-        u = np.zeros((6,Na))
-        for i in range(Na):
-            u[:,i] = solve(A[:,:,i],b[:,i]) #  u = [c2, s2, c3, s3, c4, s4]
-            
-        u = np.concatenate((np.ones((1,Na)), u),axis=0) # append c1; u : (7,Na)
-        # 2. Build the Q vector, 
-        Q = np.zeros((7,Na))
-        # the constant term is a special case,
-        h1 = self.hn(1,alpha)
-        t1 = np.cos(h1*self.kappa)*self.Cpp(-self.xd,1,alpha)
-        t2 = self.Lam3*h1*np.sin(h1*self.kappa)*self.C(-self.xd,1,alpha)
-        Q[0,:] = t1 - t2
-        for ci, n in zip([1,3,5],[2,3,4]):
-            si = ci+1 # sine-term index,
-            hn = self.hn(n, alpha)
-            hnk = hn*self.kappa
-            Q[ci,:] = self.Lam3*hn*np.sin(hnk)*self.C(-self.xd,n,alpha) + \
-                np.cos(hnk)*self.Cpp(-self.xd,n,alpha)
-            Q[si,:] = self.Lam3*hn*np.sin(hnk)*self.S(-self.xd,n,alpha) + \
-                np.cos(hnk)*self.Spp(-self.xd,n,alpha)
-        # Compute E,
-        #   dot Q : (7, Na) into each u : (7, Na) 
-        out = ([np.dot(x,y) for x,y in zip(Q.T,u.T)]/np.linalg.norm(Q*u,ord=1,axis=0))**2
+        A, b = self.Ab(alpha)
         
-        return out
-    
+        n_vars = A.shape[0]
+        u = np.zeros((n_vars, Na))
+        for i in range(Na):
+            u[:,i] = np.linalg.solve(A[:,:,i], b[:,i])
+            
+        u = np.concatenate((np.ones((1,Na)), u), axis=0)
+        Q = np.zeros((n_vars + 1, Na))
+        
+        if self.config == 'limiter':
+            h1 = self.hn(1,alpha)
+            t1 = np.cos(h1*self.kappa)*self.Cpp(-self.xd,1,alpha)
+            t2 = self.Lam3*h1*np.sin(h1*self.kappa)*self.C(-self.xd,1,alpha)
+            Q[0,:] = t1 - t2
+            for ci, n in zip([1,3,5],[2,3,4]):
+                si = ci+1
+                hn = self.hn(n, alpha)
+                hnk = hn*self.kappa
+                Q[ci,:] = self.Lam3*hn*np.sin(hnk)*self.C(-self.xd,n,alpha) + np.cos(hnk)*self.Cpp(-self.xd,n,alpha)
+                Q[si,:] = self.Lam3*hn*np.sin(hnk)*self.S(-self.xd,n,alpha) + np.cos(hnk)*self.Spp(-self.xd,n,alpha)
+                
+        elif self.config == 'double-null':
+            h1 = self.hn(1,alpha)
+            Q[0,:] = -h1 * np.sin(h1*self.kappa_X) * self.C(-self.x_X, 1, alpha)
+            for ci, n in zip([1,3,5],[2,3,4]):
+                si = ci+1
+                hn = self.hn(n, alpha)
+                Q[ci,:] = -hn * np.sin(hn*self.kappa_X) * self.C(-self.x_X, n, alpha)
+                Q[si,:] = -hn * np.sin(hn*self.kappa_X) * self.S(-self.x_X, n, alpha)
+                
+        elif self.config == 'single-null':
+            u_map = [
+                (2, False, False), (2, False, True), (3, False, False), (3, False, True), 
+                (4, False, False), (4, False, True), (1, True, False), (2, True, False), 
+                (2, True, True), (3, True, False), (3, True, True),
+            ]
+            def expr_func(n, isn, isS):
+                return self.eval_term('psi_xx', -self.xd, self.kappa, n, isn, isS, alpha) - self.Lam3 * self.eval_term('psi_y', -self.xd, self.kappa, n, isn, isS, alpha)
+            
+            Q[0, :] = expr_func(1, False, False)
+            for col, (n, is_sin, is_S) in enumerate(u_map):
+                Q[col+1, :] = expr_func(n, is_sin, is_S)
+                
+        err = np.zeros(Na)
+        for i in range(Na):
+            div = np.sum(np.abs(Q[:,i]*u[:,i]))
+            if div == 0: div = 1e-15
+            err[i] = (np.dot(Q[:,i], u[:,i])/div)**2
+            
+        return err
     def Ab(self, alpha):
         """
         Function defining the linear system A*u = b
-        The vector u = [c2, s2, c3, s3, c4, s4].
-        The vector b are those terms proportional to c1(:=1)
-
         Returns
         -------
-        A : np.3darray : (6, 6, len(alpha))
+        A : np.3darray
             square matrix for each value of alpha defining the linear system.
-        b : np.2darray : (6, len(alpha))
+        b : np.2darray
             RHS of the linear system: A*u = b
         """
         Na = len(alpha)
-        # Pre-compute,
-        h1 = self.hn(1,alpha)
-        # 1. The b vector,
-        b = [self.C(-1,1,alpha), # (a)
-                self.C(1,1,alpha), # (b)
-                np.cos(h1*self.kappa)*self.C(-self.xd,1,alpha), # (c)
-                np.cos(h1*self.kappa)*self.Cp(-self.xd,1,alpha), # (d)
-                self.Lam1*self.Cp(-1,1,alpha) - h1**2*self.C(-1,1,alpha), # (e)
-                -self.Lam2*self.Cp(1,1,alpha) - h1**2*self.C(1,1,alpha), # (f)
+        
+        if self.config in ['limiter', 'double-null']:
+            h1 = self.hn(1,alpha)
+            x_top = self.xd if self.config == 'limiter' else self.x_X
+            y_top = self.kappa if self.config == 'limiter' else self.kappa_X
+            
+            b = [self.C(-1,1,alpha), # (a)
+                 self.C(1,1,alpha), # (b)
+                 np.cos(h1*y_top)*self.C(-x_top,1,alpha), # (c)
+                 np.cos(h1*y_top)*self.Cp(-x_top,1,alpha), # (d)
+                 self.Lam1*self.Cp(-1,1,alpha) - h1**2*self.C(-1,1,alpha), # (e)
+                 -self.Lam2*self.Cp(1,1,alpha) - h1**2*self.C(1,1,alpha), # (f)
                 ]
-        b = -1*np.array(b) # (6, Na), multiply by -1 to move to RHS.
-        # 2. Build the system of equations,
-        A = np.zeros((6,6,Na))
-        # Fill the remaining terms,
-        for ci, n in zip([0,2,4],[2,3,4]):
-            si = ci+1 # sine-term index,
-            # Now we go equation-by-equation, 
-            # (a)
-            A[0,ci,:] = self.C(-1,n,alpha)
-            A[0,si,:] = self.S(-1,n,alpha)
-            # (b)
-            A[1,ci,:] = self.C(1,n,alpha)
-            A[1,si,:] = self.S(1,n,alpha)
-            # (c)
-            chk = np.cos(self.hn(n,alpha)*self.kappa)
-            A[2,ci,:] = chk*self.C(-self.xd,n,alpha)
-            A[2,si,:] = chk*self.S(-self.xd,n,alpha)
-            # (d)
-            A[3,ci,:] = chk*self.Cp(-self.xd,n,alpha)
-            A[3,si,:] = chk*self.Sp(-self.xd,n,alpha)
-            # (e)
-            A[4,ci,:] = self.Lam1*self.Cp(-1,n,alpha) - self.hn(n,alpha)**2*self.C(-1, n, alpha)
-            A[4,si,:] = self.Lam1*self.Sp(-1,n,alpha) - self.hn(n,alpha)**2*self.S(-1, n, alpha)
-            # (f)
-            A[5,ci,:] = -self.Lam2*self.Cp(1,n,alpha) - self.hn(n,alpha)**2*self.C(1, n, alpha)
-            A[5,si,:] = -self.Lam2*self.Sp(1,n,alpha) - self.hn(n,alpha)**2*self.S(1, n, alpha)
+            b = -1*np.array(b) # (6, Na), multiply by -1 to move to RHS.
+            
+            A = np.zeros((6,6,Na))
+            for ci, n in zip([0,2,4],[2,3,4]):
+                si = ci+1
+                A[0,ci,:] = self.C(-1,n,alpha)
+                A[0,si,:] = self.S(-1,n,alpha)
+                A[1,ci,:] = self.C(1,n,alpha)
+                A[1,si,:] = self.S(1,n,alpha)
                 
+                chk = np.cos(self.hn(n,alpha)*y_top)
+                A[2,ci,:] = chk*self.C(-x_top,n,alpha)
+                A[2,si,:] = chk*self.S(-x_top,n,alpha)
+                A[3,ci,:] = chk*self.Cp(-x_top,n,alpha)
+                A[3,si,:] = chk*self.Sp(-x_top,n,alpha)
+                
+                A[4,ci,:] = self.Lam1*self.Cp(-1,n,alpha) - self.hn(n,alpha)**2*self.C(-1, n, alpha)
+                A[4,si,:] = self.Lam1*self.Sp(-1,n,alpha) - self.hn(n,alpha)**2*self.S(-1, n, alpha)
+                A[5,ci,:] = -self.Lam2*self.Cp(1,n,alpha) - self.hn(n,alpha)**2*self.C(1, n, alpha)
+                A[5,si,:] = -self.Lam2*self.Sp(1,n,alpha) - self.hn(n,alpha)**2*self.S(1, n, alpha)
+        
+        elif self.config == 'single-null':
+            u_map = [
+                (2, False, False), (2, False, True),  
+                (3, False, False), (3, False, True),  
+                (4, False, False), (4, False, True),  
+                (1, True, False),  (2, True, False),  
+                (2, True, True),   (3, True, False),  
+                (3, True, True),   
+            ]
+            A = np.zeros((11, 11, Na))
+            b = np.zeros((11, Na))
+            
+            def add_constraint(row, expr_func):
+                b[row, :] = -1 * expr_func(1, False, False)
+                for col, (n, is_sin, is_S) in enumerate(u_map):
+                    A[row, col, :] = expr_func(n, is_sin, is_S)
+                    
+            xd = self.xd
+            k = self.kappa
+            xX = self.x_X
+            kX = self.kappa_X
+
+            add_constraint(0, lambda n, isn, isS: self.eval_term('psi', -1, 0, n, isn, isS, alpha))
+            add_constraint(1, lambda n, isn, isS: self.eval_term('psi', 1, 0, n, isn, isS, alpha))
+            add_constraint(2, lambda n, isn, isS: self.eval_term('psi', -xd, k, n, isn, isS, alpha))
+            add_constraint(3, lambda n, isn, isS: self.eval_term('psi', -xX, -kX, n, isn, isS, alpha))
+            add_constraint(4, lambda n, isn, isS: self.eval_term('psi_y', -1, 0, n, isn, isS, alpha))
+            add_constraint(5, lambda n, isn, isS: self.eval_term('psi_y', 1, 0, n, isn, isS, alpha))
+            add_constraint(6, lambda n, isn, isS: self.eval_term('psi_x', -xd, k, n, isn, isS, alpha))
+            add_constraint(7, lambda n, isn, isS: self.eval_term('psi_x', -xX, -kX, n, isn, isS, alpha))
+            add_constraint(8, lambda n, isn, isS: self.eval_term('psi_y', -xX, -kX, n, isn, isS, alpha))
+            add_constraint(9, lambda n, isn, isS: self.Lam1 * self.eval_term('psi_x', -1, 0, n, isn, isS, alpha) + self.eval_term('psi_yy', -1, 0, n, isn, isS, alpha))
+            add_constraint(10, lambda n, isn, isS: -self.Lam2 * self.eval_term('psi_x', 1, 0, n, isn, isS, alpha) + self.eval_term('psi_yy', 1, 0, n, isn, isS, alpha))
+            
         return A, b
            
     def plot_CS(self, x, n, alpha, axC=None,axS=None):
