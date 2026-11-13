@@ -156,7 +156,9 @@ Input params
             theta = np.linspace(0, 2*np.pi, N)
             Rs = R0 + a * np.cos(theta + self.delta_hat * np.sin(theta))
             Zs = a * self.kappa * np.sin(theta)
-            return Rs, Zs
+            angles = np.arctan2(Zs, Rs - R0)
+            sort_idx = np.argsort(angles)
+            return Rs[sort_idx], Zs[sort_idx]
             
         elif self.config == 'dn':
             x1 = self.xi - self.delta_X
@@ -176,7 +178,9 @@ Input params
             
             Rs = np.concatenate([Rs_in, Rs_out[::-1]])
             Zs = np.concatenate([Zs_in, Zs_out[::-1]])
-            return Rs, Zs
+            angles = np.arctan2(Zs, Rs - R0)
+            sort_idx = np.argsort(angles)
+            return Rs[sort_idx], Zs[sort_idx]
             
         elif self.config == 'lsn':
             x1 = self.xi - self.delta_X
@@ -201,7 +205,9 @@ Input params
             
             Rs = np.concatenate([Rs_up[::-1], Rs_in, Rs_out])
             Zs = np.concatenate([Zs_up[::-1], Zs_in, Zs_out])
-            return Rs, Zs
+            angles = np.arctan2(Zs, Rs - R0)
+            sort_idx = np.argsort(angles)
+            return Rs[sort_idx], Zs[sort_idx]
 
     def get_PsiRZ(self, R0, B0, p0, Nx=257, Ny=257, levels=None, do_trace=True, alpha=None,show_plot=True, **kwargs):
         """
