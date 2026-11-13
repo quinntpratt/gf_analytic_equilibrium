@@ -65,7 +65,7 @@ class GFeq(object):
         nu : float
             Related to \beta_p.
         config : str
-            'limiter', 'double-null', or 'single-null'.
+            'limiter', 'dn', or 'lsn'.
         kappa_X : float
             Elongation at X-point (for divertor configs).
         delta_X : float
@@ -89,7 +89,9 @@ class GFeq(object):
             self.Lam1 = (1 - self.eps)*(1 - self.delta_hat)**2/self.kappa**2
             self.Lam2 = (1 + self.eps)*(1 + self.delta_hat)**2/self.kappa**2
             self.Lam3 = self.kappa/( (1 - self.eps*self.delta)**2*(1 - self.delta**2) )
-        elif self.config == 'double-null':
+        elif self.config == 'dn':
+            if self.kappa_X <= 2 * np.sqrt(1 - self.delta_X**2):
+                raise ValueError("kappa_X must be > 2*sqrt(1 - delta_X^2) for divertor configs.")
             if self.kappa_X is None or self.delta_X is None:
                 raise ValueError("kappa_X and delta_X must be provided for double-null config.")
             self.x_X = self.delta_X + 0.5*self.eps*(1 - self.delta_X**2)
@@ -97,7 +99,9 @@ class GFeq(object):
             self.Lam1 = (1 - self.eps)*(1 - self.delta_X)*(1 + self.xi)/self.kappa_X**2
             self.Lam2 = (1 + self.eps)*(1 + self.delta_X)*(1 + self.xi)/self.kappa_X**2
             self.Lam3 = 0.0 # Unused in double-null
-        elif self.config == 'single-null':
+        elif self.config == 'lsn':
+            if self.kappa_X <= 2 * np.sqrt(1 - self.delta_X**2):
+                raise ValueError("kappa_X must be > 2*sqrt(1 - delta_X^2) for divertor configs.")
             if self.kappa_X is None or self.delta_X is None:
                 raise ValueError("kappa_X and delta_X must be provided for single-null config.")
             self.delta_hat = np.arcsin(self.delta)
@@ -113,6 +117,16 @@ class GFeq(object):
             self.Lam3 = self.kappa/( (1 - self.eps*self.delta)**2*(1 - self.delta**2) )
         else:
             raise ValueError(f"Unknown config: {self.config}")
+
+        if self.config == 'limiter':
+            self.ymin = -self.kappa
+            self.ymax = self.kappa
+        elif self.config == 'dn':
+            self.ymin = -self.kappa_X
+            self.ymax = self.kappa_X
+        elif self.config == 'lsn':
+            self.ymin = -self.kappa_X
+            self.ymax = self.kappa
 
         # Physical constants,
         self.mu0 = 1.2566E-6 # vacuum perm. [m]*[kg]/[s]^2/[A]^2
@@ -133,6 +147,62 @@ Input params
 """
         return txt
             
+
+    def get_model_surface(self, N=100, R0=1.0, a=1.0):
+        """
+        Returns the (R, Z) coordinates of the model boundary surface.
+        """
+        if self.config == 'limiter':
+            theta = np.linspace(0, 2*np.pi, N)
+            Rs = R0 + a * np.cos(theta + self.delta_hat * np.sin(theta))
+            Zs = a * self.kappa * np.sin(theta)
+            return Rs, Zs
+            
+        elif self.config == 'dn':
+            x1 = self.xi - self.delta_X
+            x2 = self.xi + self.delta_X
+            theta0 = np.arctan(np.sqrt(1 - self.xi**2) / self.xi)
+            kap0 = 1.0 / np.sqrt(1 - self.xi**2)
+            
+            # Lower & Upper inboard
+            theta_in = np.linspace(np.pi - theta0, np.pi + theta0, N//2) # This is theta range
+            Rs_in = R0 + a * (x1/(1-self.xi) + (1 + x1/(1-self.xi)) * np.cos(theta_in))
+            Zs_in = a * self.kappa_X * kap0 * np.sin(theta_in)
+            
+            # Lower & Upper outboard
+            theta_out = np.linspace(-theta0, theta0, N//2)
+            Rs_out = R0 + a * (-x2/(1-self.xi) + (1 + x2/(1-self.xi)) * np.cos(theta_out))
+            Zs_out = a * self.kappa_X * kap0 * np.sin(theta_out)
+            
+            Rs = np.concatenate([Rs_in, Rs_out[::-1]])
+            Zs = np.concatenate([Zs_in, Zs_out[::-1]])
+            return Rs, Zs
+            
+        elif self.config == 'lsn':
+            x1 = self.xi - self.delta_X
+            x2 = self.xi + self.delta_X
+            theta0 = np.arctan(np.sqrt(1 - self.xi**2) / self.xi)
+            kap0 = 1.0 / np.sqrt(1 - self.xi**2)
+            
+            # Upper limiter part
+            theta_up = np.linspace(0, np.pi, N//2)
+            Rs_up = R0 + a * np.cos(theta_up + self.delta_hat * np.sin(theta_up))
+            Zs_up = a * self.kappa * np.sin(theta_up)
+            
+            # Lower inboard
+            theta_in = np.linspace(np.pi, np.pi + theta0, N//4)
+            Rs_in = R0 + a * (x1/(1-self.xi) + (1 + x1/(1-self.xi)) * np.cos(theta_in))
+            Zs_in = a * self.kappa_X * kap0 * np.sin(theta_in)
+            
+            # Lower outboard
+            theta_out = np.linspace(-theta0, 0, N//4)
+            Rs_out = R0 + a * (-x2/(1-self.xi) + (1 + x2/(1-self.xi)) * np.cos(theta_out))
+            Zs_out = a * self.kappa_X * kap0 * np.sin(theta_out)
+            
+            Rs = np.concatenate([Rs_up[::-1], Rs_in, Rs_out])
+            Zs = np.concatenate([Zs_up[::-1], Zs_in, Zs_out])
+            return Rs, Zs
+
     def get_PsiRZ(self, R0, B0, p0, Nx=257, Ny=257, levels=None, do_trace=True, alpha=None,show_plot=True, **kwargs):
         """
         Main method to compute the poloidal magnetic flux over an (R, Z) grid.
@@ -180,7 +250,7 @@ Input params
         self.p0 = p0
         # 1D normalized grids,
         x = np.linspace(-1, 1, Nx) # -1 <= x <= 1
-        y = np.linspace(-self.kappa, self.kappa, Ny) # -kappa <= y <= kappa 
+        y = np.linspace(self.ymin, self.ymax, Ny) # -kappa <= y <= kappa 
         xx, yy = np.meshgrid(x,y)
         
         # 1. Compute the GS eigenvalue (alpha)
@@ -222,14 +292,8 @@ Input params
         self.Rmaxis = float(RR.flatten()[maxis_ind])
         self.Zmaxis = 0.0 # by construction
         
-        # Compute the model surface: xs(theta), ys(theta)
-        Nt = 101
-        theta = np.linspace(0, 2*pi, Nt)
-        #xs = np.cos(theta + self.delta_hat*np.sin(theta)) - \
-        #    0.5*self.eps*(np.sin(theta + self.delta_hat*np.sin(theta)))**2
-        #ys = self.kappa*np.sin(theta)
-        self.Rms = R0 + a*np.cos(theta + self.delta_hat*np.sin(theta)) 
-        self.Zms = a*self.kappa*np.sin(theta)
+        # Compute the model surface
+        self.Rms, self.Zms = self.get_model_surface(N=100, R0=R0, a=a)
         
         Psi = psi_xy * Psi0 # [m^2*T]
         
@@ -317,7 +381,7 @@ Input params
         """
         # Generate the 2D psi_n domain, 
         x = np.linspace(-1, 1, Nx)
-        y = np.linspace(-self.kappa, self.kappa, Ny)
+        y = np.linspace(self.ymin, self.ymax, Ny)
         xx, yy = np.meshgrid(x, y)
         psi_xy = self.get_psi(xx, yy, self.alpha)
         psin_xy = -1*(psi_xy - 1) # 2D normalized psi_n
@@ -505,7 +569,7 @@ Input params
         """
         # 1D normalized grids,
         x = np.linspace(-1, 1, Nx) # -1 <= x <= 1
-        y = np.linspace(-self.kappa, self.kappa, Ny) # -kappa <= y <= kappa 
+        y = np.linspace(self.ymin, self.ymax, Ny) # -kappa <= y <= kappa 
         xx, yy = np.meshgrid(x,y)
         # Use analytic expressions for the psi_x, psi_y derivatives...
         a = self.eps*self.R0 # [m]
@@ -618,13 +682,13 @@ Input params
         psi_xy = self.eval_term('psi', x, y, 1, False, False, alpha)
         psi_00 = self.eval_term('psi', 0, 0, 1, False, False, alpha)
         
-        if self.config in ['limiter', 'double-null']:
+        if self.config in ['limiter', 'dn']:
             for i, n in zip([0,2,4],[2,3,4]):
                 psi_xy += u[i] * self.eval_term('psi', x, y, n, False, False, alpha)
                 psi_xy += u[i+1] * self.eval_term('psi', x, y, n, False, True, alpha)
                 psi_00 += u[i] * self.eval_term('psi', 0, 0, n, False, False, alpha)
                 psi_00 += u[i+1] * self.eval_term('psi', 0, 0, n, False, True, alpha)
-        elif self.config == 'single-null':
+        elif self.config == 'lsn':
             u_map = [
                 (2, False, False), (2, False, True), (3, False, False), (3, False, True), 
                 (4, False, False), (4, False, True), (1, True, False), (2, True, False), 
@@ -648,7 +712,7 @@ Input params
         psi_y = self.eval_term('psi_y', x, y, 1, False, False, alpha)
         psi_00 = self.eval_term('psi', 0, 0, 1, False, False, alpha)
         
-        if self.config in ['limiter', 'double-null']:
+        if self.config in ['limiter', 'dn']:
             for i, n in zip([0,2,4],[2,3,4]):
                 psi_x += u[i] * self.eval_term('psi_x', x, y, n, False, False, alpha)
                 psi_x += u[i+1] * self.eval_term('psi_x', x, y, n, False, True, alpha)
@@ -656,7 +720,7 @@ Input params
                 psi_y += u[i+1] * self.eval_term('psi_y', x, y, n, False, True, alpha)
                 psi_00 += u[i] * self.eval_term('psi', 0, 0, n, False, False, alpha)
                 psi_00 += u[i+1] * self.eval_term('psi', 0, 0, n, False, True, alpha)
-        elif self.config == 'single-null':
+        elif self.config == 'lsn':
             u_map = [
                 (2, False, False), (2, False, True), (3, False, False), (3, False, True), 
                 (4, False, False), (4, False, True), (1, True, False), (2, True, False), 
@@ -681,7 +745,7 @@ Input params
         psi_yy = self.eval_term('psi_yy', x, y, 1, False, False, alpha)
         psi_00 = self.eval_term('psi', 0, 0, 1, False, False, alpha)
         
-        if self.config in ['limiter', 'double-null']:
+        if self.config in ['limiter', 'dn']:
             for i, n in zip([0,2,4],[2,3,4]):
                 psi_xx += u[i] * self.eval_term('psi_xx', x, y, n, False, False, alpha)
                 psi_xx += u[i+1] * self.eval_term('psi_xx', x, y, n, False, True, alpha)
@@ -689,7 +753,7 @@ Input params
                 psi_yy += u[i+1] * self.eval_term('psi_yy', x, y, n, False, True, alpha)
                 psi_00 += u[i] * self.eval_term('psi', 0, 0, n, False, False, alpha)
                 psi_00 += u[i+1] * self.eval_term('psi', 0, 0, n, False, True, alpha)
-        elif self.config == 'single-null':
+        elif self.config == 'lsn':
             u_map = [
                 (2, False, False), (2, False, True), (3, False, False), (3, False, True), 
                 (4, False, False), (4, False, True), (1, True, False), (2, True, False), 
@@ -801,7 +865,7 @@ Input params
                 Q[ci,:] = self.Lam3*hn*np.sin(hnk)*self.C(-self.xd,n,alpha) + np.cos(hnk)*self.Cpp(-self.xd,n,alpha)
                 Q[si,:] = self.Lam3*hn*np.sin(hnk)*self.S(-self.xd,n,alpha) + np.cos(hnk)*self.Spp(-self.xd,n,alpha)
                 
-        elif self.config == 'double-null':
+        elif self.config == 'dn':
             h1 = self.hn(1,alpha)
             Q[0,:] = -h1 * np.sin(h1*self.kappa_X) * self.C(-self.x_X, 1, alpha)
             for ci, n in zip([1,3,5],[2,3,4]):
@@ -810,7 +874,7 @@ Input params
                 Q[ci,:] = -hn * np.sin(hn*self.kappa_X) * self.C(-self.x_X, n, alpha)
                 Q[si,:] = -hn * np.sin(hn*self.kappa_X) * self.S(-self.x_X, n, alpha)
                 
-        elif self.config == 'single-null':
+        elif self.config == 'lsn':
             u_map = [
                 (2, False, False), (2, False, True), (3, False, False), (3, False, True), 
                 (4, False, False), (4, False, True), (1, True, False), (2, True, False), 
@@ -842,7 +906,7 @@ Input params
         """
         Na = len(alpha)
         
-        if self.config in ['limiter', 'double-null']:
+        if self.config in ['limiter', 'dn']:
             h1 = self.hn(1,alpha)
             x_top = self.xd if self.config == 'limiter' else self.x_X
             y_top = self.kappa if self.config == 'limiter' else self.kappa_X
@@ -875,7 +939,7 @@ Input params
                 A[5,ci,:] = -self.Lam2*self.Cp(1,n,alpha) - self.hn(n,alpha)**2*self.C(1, n, alpha)
                 A[5,si,:] = -self.Lam2*self.Sp(1,n,alpha) - self.hn(n,alpha)**2*self.S(1, n, alpha)
         
-        elif self.config == 'single-null':
+        elif self.config == 'lsn':
             u_map = [
                 (2, False, False), (2, False, True),  
                 (3, False, False), (3, False, True),  
@@ -1192,13 +1256,17 @@ if __name__ == "__main__":
              "D":dict(eps=0.33, kappa=1.8, delta=0.4, nu=0.3), # alpha = 1.9057
              "negD":dict(eps=0.33, kappa=1.9, delta=-0.6, nu=0.5), # alpha = 1.8744 
              "NSTX":dict(eps=1/1.31, kappa=2,delta=0.4, nu=0.5), # alpha=1.9252
+             "DIII-D":dict(eps=0.35, kappa=1.7, delta=0.25, kappa_X=2.0, delta_X=0.35, config='lsn')
              }
     
     # Create an instance of the GF equilibrium.
-    eq = GFeq(**cases["NSTX"])
+    eq = GFeq(**cases["DIII-D"])
     # Paramters with SI units to compute the magnetic flux over R, Z,
     R0 = 1.03 # [m] 
     B0 = 0.44 # [T]
+    # DIII-D,
+    R0 = 1.7  # [m]
+    B0 = 2.1  # [T]
     # on-axis pressure,
     T0 = 4. # [keV]
     n0 = 5. # [E19 1/m^3]
@@ -1232,10 +1300,8 @@ if __name__ == "__main__":
     
     # %% Create a file of field components (and density)
     # compute the model surface, 
-    theta = np.linspace(0, 2*np.pi, 256)
     a = eq.eps*R0
-    Rs = R0 + a*np.cos(theta + eq.delta_hat*np.sin(theta)) 
-    Zs = a*eq.kappa*np.sin(theta)
+    Rs, Zs = eq.get_model_surface(N=256, R0=R0, a=a)
     
     # Compute the field components,
     B_R, B_phi, B_Z, RR, ZZ = eq.get_B()

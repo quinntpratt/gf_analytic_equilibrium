@@ -40,7 +40,7 @@ class TestGFAnalyticEq(unittest.TestCase):
 
     def test_double_null(self):
         """Test a typical double-null divertor configuration."""
-        gf = GFeq(eps=0.33, kappa=1.6, delta=0.4, nu=0.4, config='double-null', kappa_X=2.0, delta_X=0.5)
+        gf = GFeq(eps=0.33, kappa=1.6, delta=0.4, nu=0.4, config='dn', kappa_X=2.0, delta_X=0.5)
         alpha = gf.get_alpha(show_plot=False)
         self.assertIsNotNone(alpha)
         
@@ -52,7 +52,7 @@ class TestGFAnalyticEq(unittest.TestCase):
 
     def test_single_null(self):
         """Test a typical single-null divertor configuration."""
-        gf = GFeq(eps=0.33, kappa=1.6, delta=0.4, nu=1.0, config='single-null', kappa_X=2.0, delta_X=0.5)
+        gf = GFeq(eps=0.33, kappa=1.6, delta=0.4, nu=1.0, config='lsn', kappa_X=2.0, delta_X=0.5)
         alpha = gf.get_alpha(show_plot=False)
         self.assertIsNotNone(alpha)
         
